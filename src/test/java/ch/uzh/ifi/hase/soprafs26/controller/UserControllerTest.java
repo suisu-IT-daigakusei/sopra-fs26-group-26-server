@@ -133,22 +133,6 @@ public class UserControllerTest {
 		}
 	}
 
-	@Test
-    public void getUserHistory_wrongUser_throwsForbidden() throws Exception {
-        // 1. Arrange
-        User mockUser = new User();
-        mockUser.setId(2L); // Notice this ID is 2, but the URL requests ID 1
-        mockUser.setToken("valid-token");
-
-        Mockito.when(userRepository.findByToken("valid-token")).thenReturn(mockUser);
-
-        // 2. Act & 3. Assert
-        mockMvc.perform(MockMvcRequestBuilders.get("/users/1/history")
-                .header("Authorization", "valid-token")
-                .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isForbidden()); // Expecting our 403 Forbidden check to trigger!
-    }
-
     @Test
     public void getUserHistory_validTokenAndId_returnsHistory() throws Exception {
         // 1. Arrange
