@@ -153,11 +153,6 @@ public class UserController {
         if (user == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token!");
         }
-        
-        // only allow a player to see their own game history
-        if (!user.getId().equals(id)) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "No access to other users game history");
-        }
 
         List<Session> sessionHistory = historyService.getUserSessionHistory(id);
         List<SessionHistoryDTO> sessionHistoryDTOs = DTOMapper.INSTANCE.convertEntityListToSessionHistoryDTOList(sessionHistory);
