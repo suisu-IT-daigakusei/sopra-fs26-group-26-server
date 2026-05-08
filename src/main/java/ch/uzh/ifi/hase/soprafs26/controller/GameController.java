@@ -114,7 +114,7 @@ public class GameController {
     public void moveDrawFromDrawPile(
             @PathVariable String gameId,
             @RequestHeader("Authorization") String token) {
-        gameService.moveDrawFromDrawPile(gameId);
+        gameService.moveDrawFromDrawPile(gameId, token);
     }
 
     // Implement the click-handler to "pick up" the top card from the discard pile.
@@ -242,7 +242,7 @@ public class GameController {
             @PathVariable String gameId,
             @RequestHeader("Authorization") String token) {
         gameService.verifyMoveCallerIsCurrentPlayer(gameId, token);
-        gameService.moveCardToDiscardPile(gameId);
+        gameService.moveCardToDiscardPile(gameId, token);
         return gameService.getGameById(gameId);
     }
 

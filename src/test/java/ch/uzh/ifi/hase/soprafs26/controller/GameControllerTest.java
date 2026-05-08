@@ -59,7 +59,7 @@ public class GameControllerTest {
                                 .andExpect(status().isNoContent());
 
                 verify(gameService).verifyMoveCallerIsCurrentPlayer(eq(gameId), eq("token"));
-                verify(gameService).moveDrawFromDrawPile(eq(gameId));
+                verify(gameService).moveDrawFromDrawPile(eq(gameId), eq("token"));
         }
 
         @Test

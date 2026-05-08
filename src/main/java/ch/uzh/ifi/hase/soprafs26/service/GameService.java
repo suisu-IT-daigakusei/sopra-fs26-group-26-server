@@ -667,7 +667,10 @@ public class GameService {
     }
 
     // to save and broadcast: saveGameAndBroadcast(game)
-    public void moveDrawFromDrawPile(String gameId) {
+    public void moveDrawFromDrawPile(String gameId, String token) {
+
+        verifyMoveCallerIsCurrentPlayer(gameId, token);
+
         Game game = getGameById(gameId);
 
         // block drawing during initial peek phase
@@ -712,7 +715,9 @@ public class GameService {
 
     // the equivalent to moveDrawFromDrawPile - takes the current drawn card and places it on the 
     // discard pile
-    public void moveCardToDiscardPile(String gameId) {
+    public void moveCardToDiscardPile(String gameId, String token) {
+
+        verifyMoveCallerIsCurrentPlayer(gameId, token);
         Game game = getGameById(gameId);
         Card drawnCard = game.getDrawnCard();
         List<Card> discardPile = game.getDiscardPile();

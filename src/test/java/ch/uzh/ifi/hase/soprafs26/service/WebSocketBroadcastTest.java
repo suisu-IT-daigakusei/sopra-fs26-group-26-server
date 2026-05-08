@@ -109,6 +109,11 @@ class WebSocketBroadcastTest {
         Game game = new Game();
         game.setId("game-123");
         game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setCurrentPlayerId(1L);
+
+        User user = new User();
+        user.setId(1L);
+        user.setToken("testToken");
         
         List<Card> drawPile = new ArrayList<>();
         drawPile.add(new Card()); 
@@ -116,9 +121,10 @@ class WebSocketBroadcastTest {
 
         Mockito.when(gameRepository.findById("game-123")).thenReturn(Optional.of(game));
         Mockito.when(gameRepository.save(any())).thenReturn(game);
+        Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
         // Action: This triggers the internal call to gameEventPublisher.publishFilteredState(saved)
-        gameService.moveDrawFromDrawPile("game-123");
+        gameService.moveDrawFromDrawPile("game-123", "testToken");
 
         // Assertion: Verify Task #16
         verify(gameEventPublisher, times(1)).publishFilteredState(any(Game.class));

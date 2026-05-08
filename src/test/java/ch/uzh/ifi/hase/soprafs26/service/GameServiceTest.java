@@ -323,12 +323,17 @@ public class GameServiceTest {
         cardWithoutAbility.setValue(5);
         game.setDrawnCard(cardWithoutAbility);
         game.setDrawnFromDeck(true);
+        User user = new User();
+        user.setToken("testToken");
+        user.setId(1L);
+
 
         Mockito.when(gameRepository.findById("testGameId")).thenReturn(Optional.of(game));
         Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenReturn(game);
+        Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
         // call the method to apply the card ability
-        gameService.moveCardToDiscardPile("testGameId");
+        gameService.moveCardToDiscardPile("testGameId", "testToken");
 
         // make sure the outcome is as we expect for a card without ability
         assertNull(game.getDrawnCard());
@@ -356,11 +361,15 @@ public class GameServiceTest {
         peekCard.setValue(10);
         game.setDrawnCard(peekCard);
         game.setDrawnFromDeck(true);
+        User user = new User();
+        user.setId(1L);
+        user.setToken("testToken");
 
         Mockito.when(gameRepository.findById("testGameId")).thenReturn(Optional.of(game));
         Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenReturn(game);
+        Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
-        gameService.moveCardToDiscardPile("testGameId");
+        gameService.moveCardToDiscardPile("testGameId", "testToken");
 
         assertNull(game.getDrawnCard());
         assertTrue(game.getDiscardPile().contains(peekCard));
@@ -940,12 +949,16 @@ public class GameServiceTest {
                 1L, new ArrayList<>(List.of(new Card(), new Card(), new Card(), new Card())),
                 2L, new ArrayList<>(List.of(new Card(), new Card(), new Card(), new Card()))
         )));
+        User user = new User();
+        user.setId(1L);
+        user.setToken("testToken");
 
         // findById -> return game
         when(gameRepository.findById("g-ability-timeout-peek")).thenReturn(Optional.of(game));
         // save game -> return game
         when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
         doNothing().when(gameRepository).flush();
+        Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
         List<Runnable> listOfScheduled = new ArrayList<>();
         // schedule call returns a future object, so mock them 
@@ -965,7 +978,7 @@ public class GameServiceTest {
         game.setDrawnCard(fromDeck);
         game.setDrawnFromDeck(true);
         // schedules first timer (ability timer)
-        gameService.moveCardToDiscardPile("g-ability-timeout-peek");
+        gameService.moveCardToDiscardPile("g-ability-timeout-peek", "testToken");
 
         assertEquals(GameStatus.ABILITY_PEEK_SELF, game.getStatus());
         assertEquals(1L, game.getCurrentPlayerId());
@@ -993,12 +1006,16 @@ public class GameServiceTest {
                 2L, new ArrayList<>(List.of(new Card(), new Card(), new Card(), new Card())),
                 3L, new ArrayList<>(List.of(new Card(), new Card(), new Card(), new Card()))
         )));
+        User user = new User();
+        user.setId(1L);
+        user.setToken("testToken");
 
         // findById -> return game
         when(gameRepository.findById("g-ability-timeout-swap")).thenReturn(Optional.of(game));
         // save game -> return game
         when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
         doNothing().when(gameRepository).flush();
+        Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
         List<Runnable> listOfScheduled = new ArrayList<>();
         // schedule call returns a future object, so mock them 
@@ -1018,7 +1035,7 @@ public class GameServiceTest {
         game.setDrawnCard(fromDeck);
         game.setDrawnFromDeck(true);
         // schedules first timer (ability timer)
-        gameService.moveCardToDiscardPile("g-ability-timeout-swap");
+        gameService.moveCardToDiscardPile("g-ability-timeout-swap", "testToken");
 
         assertEquals(GameStatus.ABILITY_SWAP, game.getStatus());
         assertEquals(1L, game.getCurrentPlayerId());
@@ -1044,6 +1061,8 @@ public class GameServiceTest {
         Game game = new Game();
         game.setId("g-outdated-ability-timer");
         game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setCurrentPlayerId(1L);
+
         game.setOrderedPlayerIds(List.of(1L, 2L));
         game.setCurrentPlayerId(1L);
         game.setDrawPile(new ArrayList<>(List.of(new Card(), new Card(), new Card())));
@@ -1079,7 +1098,7 @@ public class GameServiceTest {
         game.setDrawnCard(firstAbilityCard);
         game.setDrawnFromDeck(true);
         // schedule first ability timer
-        gameService.moveCardToDiscardPile("g-outdated-ability-timer");
+        gameService.moveCardToDiscardPile("g-outdated-ability-timer", "token-1");
         assertEquals(GameStatus.ABILITY_PEEK_SELF, game.getStatus());
 
         // cancel first ability timer, schedule turn timer
@@ -1094,7 +1113,7 @@ public class GameServiceTest {
         game.setDrawnCard(secondAbilityCard);
         game.setDrawnFromDeck(true);
         // cancel turn timer, schedule second ability timer
-        gameService.moveCardToDiscardPile("g-outdated-ability-timer");
+        gameService.moveCardToDiscardPile("g-outdated-ability-timer", "token-2");
         assertEquals(GameStatus.ABILITY_PEEK_OPPONENT, game.getStatus());
         assertEquals(2L, game.getCurrentPlayerId());
 
@@ -1109,6 +1128,10 @@ public class GameServiceTest {
 
     @Test
     public void moveDrawFromDrawPile_emptyDrawPile_triggersAPIShuffleAndDrawsCard() {
+
+        User user = new User();
+        user.setId(1L);
+        user.setToken("testToken");
 
         Game game = new Game();
         game.setId("gameId");
@@ -1128,6 +1151,7 @@ public class GameServiceTest {
 
         when(gameRepository.findById("gameId")).thenReturn(Optional.of(game));
         when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(userRepository.findByToken("testToken")).thenReturn(user);
 
         doNothing().when(deckOfCardsAPIService).returnDrawnCardsToDeck(eq("testId"), anyList());
         doNothing().when(deckOfCardsAPIService).shuffleDeck(eq("testId"));
@@ -1138,7 +1162,7 @@ public class GameServiceTest {
         fresh2.setCode("3C");
         when(deckOfCardsAPIService.drawFromDeck(eq("testId"), eq(2))).thenReturn(List.of(fresh1, fresh2));
 
-        gameService.moveDrawFromDrawPile("gameId");
+        gameService.moveDrawFromDrawPile("gameId", "testToken");
 
         verify(deckOfCardsAPIService).returnDrawnCardsToDeck(eq("testId"), anyList());
         verify(deckOfCardsAPIService).shuffleDeck(eq("testId"));
@@ -1163,10 +1187,15 @@ public class GameServiceTest {
         game.setOrderedPlayerIds(List.of(1L, 2L));
         game.setCurrentPlayerId(1L);
 
+        User user = new User();
+        user.setId(1L);
+        user.setToken("testToken");
+
         Mockito.when(gameRepository.findById("g-peek-block")).thenReturn(Optional.of(game));
+        Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
         ResponseStatusException ex = assertThrows(ResponseStatusException.class,
-                () -> gameService.moveDrawFromDrawPile("g-peek-block"));
+                () -> gameService.moveDrawFromDrawPile("g-peek-block", "testToken"));
 
         assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
         assertEquals("Cannot draw a card right now", ex.getReason());
@@ -1598,6 +1627,10 @@ public class GameServiceTest {
         game.setOrderedPlayerIds(List.of(1L, 2L));
         game.setCurrentPlayerId(1L);
 
+        User user = new User();
+        user.setId(1L);
+        user.setToken("testToken");
+
         // Create a card that WILL be in the draw pile after reshuffle
         Card cardAfterReshuffle = new Card();
         cardAfterReshuffle.setCode("2H");
@@ -1615,8 +1648,9 @@ public class GameServiceTest {
                 return Optional.of(game); // Second call (filled)
             }
         });
+        Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
-        gameService.moveDrawFromDrawPile("g-reshuffle");
+        gameService.moveDrawFromDrawPile("g-reshuffle", "testToken");
 
         // Verify the card was drawn and set as the current drawn card
         assertNotNull(game.getDrawnCard());
