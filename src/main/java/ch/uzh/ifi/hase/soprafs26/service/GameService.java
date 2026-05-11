@@ -1885,6 +1885,7 @@ public class GameService {
 
             if (isGameOver) {
                 session.setEnded(true);
+                updateUserStatisticsAtSessionEnd(session);
             }
 
             sessionRepository.save(session);
@@ -1919,6 +1920,67 @@ public class GameService {
         } catch (Exception e) {
             System.err.println("Error checking game over conditions: " + e.getMessage());
             return false;
+        }
+    }
+
+    /**
+        update statistics of all players after session is finishesd
+    **/
+    private void updateUserStatisticsAtSessionEnd(Session session) {
+        try {
+            Map<Long, Integer> totalScores = session.getTotalScoreByUserId();
+            if (totalScores == null || totalScores.isEmpty()) {
+                return;
+            }
+
+            // get all player ID's
+            List<User> participants = userRepository.findAllById(totalScores.keySet());
+
+            // find the winner
+            int lowestScore = Integer.MAX_VALUE;
+            for (Integer score : totalScores.values()) {
+                if (score != null && score < lowestScore) {
+                    lowestScore = score;
+                }
+            }
+
+            // find all player with fewest points
+            List<Long> winners = new ArrayList<>();
+            for (Map.Entry<Long, Integer> entry : totalScores.entrySet()) {
+                if (entry.getValue() != null && entry.getValue() == lowestScore) {
+                    winners.add(entry.getKey());
+                }
+            }
+
+            // update statistics
+            for (User user : participants) {
+                Long userId = user.getId();
+                
+                // increase amount of games +1
+                int currentGames = user.getGamesPlayed() != null ? user.getGamesPlayed() : 0;
+                user.setGamesPlayed(currentGames + 1);
+
+                // sum up amount of points
+                int sessionPoints = totalScores.getOrDefault(userId, 0);
+                int currentPointsAccumulated = user.getTotalPointsAccumulated() != null ? user.getTotalPointsAccumulated() : 0;
+                user.setTotalPointsAccumulated(currentPointsAccumulated + sessionPoints);
+
+                // update wins/losses
+                if (winners.contains(userId)) {
+                    int currentWins = user.getGamesWon() != null ? user.getGamesWon() : 0;
+                    user.setGamesWon(currentWins + 1);
+                } else {
+                    int currentLosses = user.getGamesLost() != null ? user.getGamesLost() : 0;
+                    user.setGamesLost(currentLosses + 1);
+                }
+            }
+
+            // save results
+            userRepository.saveAll(participants);
+
+        } catch (Exception e) {
+            System.err.println("Error updating user statistics at session end: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 }   

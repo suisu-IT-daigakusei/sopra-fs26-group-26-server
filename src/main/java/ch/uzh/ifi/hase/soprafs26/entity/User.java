@@ -76,6 +76,15 @@ public class User implements Serializable { // public: Klasse kann von überall 
     private java.time.Instant lastHeartbeat;
 
 
+    // implemented it as a test so task 125 works, but please check when doing task 124 and correct!
+    @Column(nullable = false)
+    private Integer gamesPlayed = 0;
+    @Column(nullable = false)
+    private Integer gamesLost = 0;
+    @Column(nullable = false)
+    private Integer totalPointsAccumulated = 0;
+
+
     // GET  liest die werte und SET setzt die werte,
     // weil alle felder private sind brauch man GET und Set um von aussen zugriff zu haben
     public Long getId() {
@@ -173,6 +182,16 @@ public class User implements Serializable { // public: Klasse kann von überall 
     public Boolean getIsPublicLog() { return isPublicLog; }
 
     public void setIsPublicLog(Boolean isPublicLog) { this.isPublicLog = isPublicLog; }
+
+    // implemented it as a test so task 125 works, but please check when doing task 124 and correct!
+    public Integer getGamesPlayed() { return gamesPlayed; }
+    public void setGamesPlayed(Integer gamesPlayed) { this.gamesPlayed = gamesPlayed; }
+
+    public Integer getGamesLost() { return gamesLost; }
+    public void setGamesLost(Integer gamesLost) { this.gamesLost = gamesLost; }
+
+    public Integer getTotalPointsAccumulated() { return totalPointsAccumulated; }
+    public void setTotalPointsAccumulated(Integer totalPointsAccumulated) { this.totalPointsAccumulated = totalPointsAccumulated; }
 
 
 }
