@@ -68,6 +68,10 @@ public class Lobby implements Serializable {
     @Column(nullable = false)
     private Long websocketGraceSeconds = 300L;
 
+    // Per-lobby chat cooldown in seconds.
+    @Column(nullable = false)
+    private Long chatCooldownSeconds = 3L;
+
     // user ID's of the spectators
     @ElementCollection
     private List<Long> spectatorIds = new ArrayList<>();
@@ -130,6 +134,9 @@ public class Lobby implements Serializable {
 
     public Long getWebsocketGraceSeconds() { return websocketGraceSeconds; }
     public void setWebsocketGraceSeconds(Long websocketGraceSeconds) { this.websocketGraceSeconds = websocketGraceSeconds; }
+
+    public Long getChatCooldownSeconds() { return chatCooldownSeconds; }
+    public void setChatCooldownSeconds(Long chatCooldownSeconds) { this.chatCooldownSeconds = chatCooldownSeconds; }
 
     public List<Long> getSpectatorIds() { return spectatorIds; }
     public void setSpectatorIds(List<Long> spectatorIds) { this.spectatorIds = spectatorIds; }

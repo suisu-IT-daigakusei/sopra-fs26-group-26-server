@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -34,6 +35,7 @@ class GameStateBroadcastMapperTest {
     void setUp() {
         lobbyService = mock(LobbyService.class);
         when(lobbyService.isPlayerTimedOutInPlaying(anyLong())).thenReturn(false);
+        when(lobbyService.findPlayingSessionIdForPlayers(anyList())).thenReturn("ABCD1234");
         mapper = new GameStateBroadcastMapper(lobbyService);
     }
 
@@ -65,6 +67,7 @@ class GameStateBroadcastMapperTest {
         game.setOrderedPlayerIds(List.of(1L, 2L));
 
         GameStateBroadcastDTO for1 = mapper.toBroadcastForViewer(game, 1L);
+        assertEquals("ABCD1234", for1.getSessionId());
         assertEquals(1, for1.getDrawPileCount());
         // own card - but visibility is false
         assertNull(findPlayerHand(for1, 1L).getCards().get(0).getValue());

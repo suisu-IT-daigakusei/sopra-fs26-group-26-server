@@ -67,6 +67,9 @@ class WebSocketBroadcastTest {
     @Mock
     private DisconnectService disconnectService;
 
+    @Mock
+    private LobbyChatService lobbyChatService;
+
     @InjectMocks
     private GameService gameService;
 
@@ -99,6 +102,9 @@ class WebSocketBroadcastTest {
         Mockito.when(lobbySettings.getAbilitySwapDefaultSeconds()).thenReturn(10L);
         Mockito.when(lobbySettings.getWebsocketGraceMinSeconds()).thenReturn(180L);
         Mockito.when(lobbySettings.getWebsocketGraceMaxSeconds()).thenReturn(600L);
+        Mockito.when(lobbySettings.getChatCooldownDefaultSeconds()).thenReturn(3L);
+        Mockito.when(lobbySettings.getChatCooldownMinSeconds()).thenReturn(1L);
+        Mockito.when(lobbySettings.getChatCooldownMaxSeconds()).thenReturn(60L);
     }
 
     @Test

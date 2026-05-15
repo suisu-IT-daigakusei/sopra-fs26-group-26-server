@@ -72,6 +72,7 @@ public class GameService {
     private final GameEventPublisher gameEventPublisher;
     private final ScheduledExecutorService scheduler;
     private final LobbyService lobbyService;
+    private final LobbyChatService lobbyChatService;
     private final SessionRepository sessionRepository;
     private final GameSettingsProperties gameSettings;
     // map to store tasks - key: gameId, value: scheduled task
@@ -149,7 +150,7 @@ public class GameService {
     public GameService(GameRepository gameRepository, DeckOfCardsAPIService deckOfCardsAPIService,
                        UserRepository userRepository, GameEventPublisher gameEventPublisher,
                        ScheduledExecutorService scheduler, GameSettingsProperties gameSettings) {
-        this(gameRepository, deckOfCardsAPIService, userRepository, gameEventPublisher, scheduler, null, null, gameSettings, null);
+        this(gameRepository, deckOfCardsAPIService, userRepository, gameEventPublisher, scheduler, null, null, gameSettings, null, null);
     }
 
     // Used by Spring: allows game lifecycle -> lobby lifecycle handoff after round end.
@@ -159,6 +160,7 @@ public class GameService {
                        ScheduledExecutorService scheduler, @Lazy LobbyService lobbyService,
                        @Lazy SessionRepository sessionRepository,
                        GameSettingsProperties gameSettings,
+                       @Lazy LobbyChatService lobbyChatService,
                        ApplicationEventPublisher eventPublisher) {
         this.gameRepository = gameRepository;
         this.deckOfCardsAPIService = deckOfCardsAPIService;
@@ -168,6 +170,7 @@ public class GameService {
         this.lobbyService = lobbyService;
         this.sessionRepository = sessionRepository;
         this.gameSettings = gameSettings;
+        this.lobbyChatService = lobbyChatService;
         this.eventPublisher = eventPublisher;
     }
 

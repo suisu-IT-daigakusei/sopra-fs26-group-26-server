@@ -15,6 +15,7 @@ public class WaitingLobbyViewDTO {
     private Long abilitySwapSeconds;
     private Long absentRoundPoints;
     private Long websocketGraceSeconds;
+    private Long chatCooldownSeconds;
     private Boolean viewerIsHost;
     private List<WaitingLobbyPlayerRowDTO> players = new ArrayList<>();
 
@@ -96,6 +97,14 @@ public class WaitingLobbyViewDTO {
 
     public void setWebsocketGraceSeconds(Long websocketGraceSeconds) {
         this.websocketGraceSeconds = websocketGraceSeconds;
+    }
+
+    public Long getChatCooldownSeconds() {
+        return chatCooldownSeconds;
+    }
+
+    public void setChatCooldownSeconds(Long chatCooldownSeconds) {
+        this.chatCooldownSeconds = chatCooldownSeconds;
     }
 
     public Boolean getViewerIsHost() {

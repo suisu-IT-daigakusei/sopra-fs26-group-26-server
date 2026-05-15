@@ -1,9 +1,12 @@
 package ch.uzh.ifi.hase.soprafs26.controller;
 
 import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbyChatMessageDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbyChatSendDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbyReadyPatchDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbySettingsPatchDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.WaitingLobbyViewDTO;
+import ch.uzh.ifi.hase.soprafs26.service.LobbyChatService;
 import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbyGetDTO;
 import org.springframework.http.HttpStatus;
@@ -17,9 +20,11 @@ import java.util.Map;
 public class LobbyController {
 
     private final LobbyService lobbyService;
+    private final LobbyChatService lobbyChatService;
 
-    public LobbyController(LobbyService lobbyService) {
+    public LobbyController(LobbyService lobbyService, LobbyChatService lobbyChatService) {
         this.lobbyService = lobbyService;
+        this.lobbyChatService = lobbyChatService;
     }
 
     // POST /lobbies — create a new lobby
@@ -81,6 +86,21 @@ public class LobbyController {
                                                @RequestHeader("Authorization") String token) {
 
         return lobbyService.getWaitingLobbyView(token, sessionId);
+    }
+
+    @GetMapping("/lobbies/{sessionId}/chat/messages")
+    @ResponseStatus(HttpStatus.OK)
+    public List<LobbyChatMessageDTO> getLobbyChatMessages(@PathVariable String sessionId,
+                                                          @RequestHeader("Authorization") String token) {
+        return lobbyChatService.getMessages(token, sessionId);
+    }
+
+    @PostMapping("/lobbies/{sessionId}/chat/messages")
+    @ResponseStatus(HttpStatus.OK)
+    public LobbyChatMessageDTO sendLobbyChatMessage(@PathVariable String sessionId,
+                                                    @RequestHeader("Authorization") String token,
+                                                    @RequestBody LobbyChatSendDTO body) {
+        return lobbyChatService.sendMessage(token, sessionId, body);
     }
 
     @GetMapping("/lobbies/my/waiting")

@@ -10,6 +10,7 @@ public class LobbySettingsPatchDTO {
     private Long abilitySwapSeconds;
     private Long absentRoundPoints;
     private Long websocketGraceSeconds;
+    private Long chatCooldownSeconds;
 
     public Boolean getIsPublic() {
         return isPublic;
@@ -73,5 +74,13 @@ public class LobbySettingsPatchDTO {
 
     public void setWebsocketGraceSeconds(Long websocketGraceSeconds) {
         this.websocketGraceSeconds = websocketGraceSeconds;
+    }
+
+    public Long getChatCooldownSeconds() {
+        return chatCooldownSeconds;
+    }
+
+    public void setChatCooldownSeconds(Long chatCooldownSeconds) {
+        this.chatCooldownSeconds = chatCooldownSeconds;
     }
 }

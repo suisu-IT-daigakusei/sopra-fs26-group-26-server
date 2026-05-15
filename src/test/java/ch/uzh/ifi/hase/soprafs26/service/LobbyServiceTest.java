@@ -58,6 +58,9 @@ public class LobbyServiceTest {
 	@Mock
 	private LobbySettingsProperties lobbySettingsProperties;
 
+	@Mock
+	private LobbyChatService lobbyChatService;
+
 	@InjectMocks
 	private LobbyService lobbyService;
 
@@ -69,8 +72,9 @@ public class LobbyServiceTest {
 		Mockito.when(lobbySettingsProperties.getInitialPeekDefaultSeconds()).thenReturn(10L);
 		Mockito.when(lobbySettingsProperties.getTurnDefaultSeconds()).thenReturn(30L);
 		Mockito.when(lobbySettingsProperties.getAbilityRevealDefaultSeconds()).thenReturn(5L);
-		Mockito.when(lobbySettingsProperties.getAbilitySwapDefaultSeconds()).thenReturn(10L);
-		Mockito.when(lobbySettingsProperties.getWebsocketGraceDefaultSeconds()).thenReturn(300L);
+			Mockito.when(lobbySettingsProperties.getAbilitySwapDefaultSeconds()).thenReturn(10L);
+			Mockito.when(lobbySettingsProperties.getWebsocketGraceDefaultSeconds()).thenReturn(300L);
+			Mockito.when(lobbySettingsProperties.getChatCooldownDefaultSeconds()).thenReturn(3L);
 		Mockito.when(lobbySettingsProperties.getAfkTimeoutMinSeconds()).thenReturn(180L);
 		Mockito.when(lobbySettingsProperties.getAfkTimeoutMaxSeconds()).thenReturn(1200L);
 		Mockito.when(lobbySettingsProperties.getInitialPeekMinSeconds()).thenReturn(3L);
@@ -80,9 +84,11 @@ public class LobbyServiceTest {
 		Mockito.when(lobbySettingsProperties.getAbilityRevealMinSeconds()).thenReturn(3L);
 		Mockito.when(lobbySettingsProperties.getAbilityRevealMaxSeconds()).thenReturn(10L);
 		Mockito.when(lobbySettingsProperties.getAbilitySwapMinSeconds()).thenReturn(5L);
-		Mockito.when(lobbySettingsProperties.getAbilitySwapMaxSeconds()).thenReturn(30L);
-		Mockito.when(lobbySettingsProperties.getWebsocketGraceMinSeconds()).thenReturn(180L);
-		Mockito.when(lobbySettingsProperties.getWebsocketGraceMaxSeconds()).thenReturn(600L);
+			Mockito.when(lobbySettingsProperties.getAbilitySwapMaxSeconds()).thenReturn(30L);
+			Mockito.when(lobbySettingsProperties.getWebsocketGraceMinSeconds()).thenReturn(180L);
+			Mockito.when(lobbySettingsProperties.getWebsocketGraceMaxSeconds()).thenReturn(600L);
+			Mockito.when(lobbySettingsProperties.getChatCooldownMinSeconds()).thenReturn(1L);
+			Mockito.when(lobbySettingsProperties.getChatCooldownMaxSeconds()).thenReturn(60L);
 		// by default return empty list
 		Mockito.when(lobbyRepository.findByStatusAndParticipantId(Mockito.anyString(), Mockito.anyLong()))
 				.thenReturn(List.of());

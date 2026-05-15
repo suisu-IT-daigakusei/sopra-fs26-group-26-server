@@ -86,6 +86,9 @@ public class GameStateBroadcastMapper {
         if (ordered == null) {
             ordered = List.of();
         }
+        if (lobbyService != null) {
+            dto.setSessionId(lobbyService.findPlayingSessionIdForPlayers(ordered));
+        }
         dto.setTimedOutPlayerIds(
                 ordered.stream()
                         .filter(id -> id != null && lobbyService != null && lobbyService.isPlayerTimedOutInPlaying(id))

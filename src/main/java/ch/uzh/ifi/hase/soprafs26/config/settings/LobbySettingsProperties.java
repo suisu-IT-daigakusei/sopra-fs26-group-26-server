@@ -70,6 +70,14 @@ public class LobbySettingsProperties {
     @Min(1)
     private long websocketGraceMaxSeconds = 600;
 
+    // Chat cooldown: default and host-adjustable range.
+    @Min(1)
+    private long chatCooldownDefaultSeconds = 3;
+    @Min(1)
+    private long chatCooldownMinSeconds = 1;
+    @Min(1)
+    private long chatCooldownMaxSeconds = 60;
+
     public long getAfkTimeoutDefaultSeconds() { return afkTimeoutDefaultSeconds; }
     public void setAfkTimeoutDefaultSeconds(long afkTimeoutDefaultSeconds) { this.afkTimeoutDefaultSeconds = afkTimeoutDefaultSeconds; }
     public long getAfkTimeoutMinSeconds() { return afkTimeoutMinSeconds; }
@@ -118,4 +126,11 @@ public class LobbySettingsProperties {
     public void setWebsocketGraceMinSeconds(long websocketGraceMinSeconds) { this.websocketGraceMinSeconds = websocketGraceMinSeconds; }
     public long getWebsocketGraceMaxSeconds() { return websocketGraceMaxSeconds; }
     public void setWebsocketGraceMaxSeconds(long websocketGraceMaxSeconds) { this.websocketGraceMaxSeconds = websocketGraceMaxSeconds; }
+
+    public long getChatCooldownDefaultSeconds() { return chatCooldownDefaultSeconds; }
+    public void setChatCooldownDefaultSeconds(long chatCooldownDefaultSeconds) { this.chatCooldownDefaultSeconds = chatCooldownDefaultSeconds; }
+    public long getChatCooldownMinSeconds() { return chatCooldownMinSeconds; }
+    public void setChatCooldownMinSeconds(long chatCooldownMinSeconds) { this.chatCooldownMinSeconds = chatCooldownMinSeconds; }
+    public long getChatCooldownMaxSeconds() { return chatCooldownMaxSeconds; }
+    public void setChatCooldownMaxSeconds(long chatCooldownMaxSeconds) { this.chatCooldownMaxSeconds = chatCooldownMaxSeconds; }
 }

@@ -79,6 +79,9 @@ public class GameServiceTest {
     @Mock
     private SessionRepository sessionRepository;
 
+    @Mock
+    private LobbyChatService lobbyChatService;
+
     @InjectMocks
     private GameService gameService;
 

@@ -1,7 +1,9 @@
 package ch.uzh.ifi.hase.soprafs26.controller;
 
 import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbyChatMessageDTO;
 import ch.uzh.ifi.hase.soprafs26.service.GameService;
+import ch.uzh.ifi.hase.soprafs26.service.LobbyChatService;
 import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,6 +30,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -42,6 +45,9 @@ public class LobbyControllerTest {
 
 	@MockitoBean
 	private GameService gameService;
+
+	@MockitoBean
+	private LobbyChatService lobbyChatService;
 
 	@Test
 	public void patchLobbySettings_validBody_returnsLobby() throws Exception {
@@ -117,5 +123,67 @@ public class LobbyControllerTest {
 				.andExpect(status().isOk());
 
 		verify(lobbyService, times(1)).joinLobby(eq(sessionId), eq(token));
+	}
+
+	@Test
+	public void postLobbyChatMessage_validRequest_returnsMessage() throws Exception {
+		LobbyChatMessageDTO response = new LobbyChatMessageDTO();
+		response.setSequence(1L);
+		response.setSessionId("ABCD12EF");
+		response.setUserId(1L);
+		response.setUsername("alice");
+		response.setText("hello");
+
+		given(lobbyChatService.sendMessage(eq("my-token"), eq("ABCD12EF"), any()))
+				.willReturn(response);
+
+		mockMvc.perform(post("/lobbies/ABCD12EF/chat/messages")
+						.header("Authorization", "my-token")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(asJsonString(java.util.Map.of("message", "hello"))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.sessionId", is("ABCD12EF")))
+				.andExpect(jsonPath("$.text", is("hello")));
+	}
+
+	@Test
+	public void getLobbyChatMessages_validRequest_returnsList() throws Exception {
+		LobbyChatMessageDTO response = new LobbyChatMessageDTO();
+		response.setSequence(1L);
+		response.setSessionId("ABCD12EF");
+		response.setUserId(1L);
+		response.setUsername("alice");
+		response.setText("hello");
+
+		given(lobbyChatService.getMessages(eq("my-token"), eq("ABCD12EF")))
+				.willReturn(List.of(response));
+
+		mockMvc.perform(get("/lobbies/ABCD12EF/chat/messages")
+						.header("Authorization", "my-token"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$[0].sessionId", is("ABCD12EF")))
+				.andExpect(jsonPath("$[0].text", is("hello")));
+	}
+
+	@Test
+	public void postLobbyChatMessage_cooldownActive_returnsTooManyRequests() throws Exception {
+		given(lobbyChatService.sendMessage(eq("my-token"), eq("ABCD12EF"), any()))
+				.willThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Chat cooldown active"));
+
+		mockMvc.perform(post("/lobbies/ABCD12EF/chat/messages")
+						.header("Authorization", "my-token")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(asJsonString(java.util.Map.of("message", "hello"))))
+				.andExpect(status().isTooManyRequests());
+	}
+
+	@Test
+	public void getLobbyChatMessages_invalidToken_returnsUnauthorized() throws Exception {
+		given(lobbyChatService.getMessages(eq("bad-token"), eq("ABCD12EF")))
+				.willThrow(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token"));
+
+		mockMvc.perform(get("/lobbies/ABCD12EF/chat/messages")
+						.header("Authorization", "bad-token"))
+				.andExpect(status().isUnauthorized());
 	}
 }

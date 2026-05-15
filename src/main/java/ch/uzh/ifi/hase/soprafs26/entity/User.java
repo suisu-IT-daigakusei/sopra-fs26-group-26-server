@@ -80,10 +80,10 @@ public class User implements Serializable { // public: Klasse kann von überall 
     private Boolean tutorialsEnabled = true;
 
     @Column(nullable = false)
-    private Integer musicVolume = 60;
+    private Integer musicVolume = 10;
 
     @Column(nullable = false)
-    private Integer soundEffectsVolume = 70;
+    private Integer soundEffectsVolume = 30;
 
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "user_music_blacklist", joinColumns = @JoinColumn(name = "user_id"))

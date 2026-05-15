@@ -115,6 +115,8 @@ public class UserServiceTest {
 		assertEquals(testUser.getId(), createdUser.getId());
 		assertEquals(testUser.getName(), createdUser.getName());
 		assertEquals(testUser.getUsername(), createdUser.getUsername());
+        assertEquals(10, createdUser.getMusicVolume());
+        assertEquals(30, createdUser.getSoundEffectsVolume());
 		assertNotNull(createdUser.getToken());
 		//assertEquals(UserStatus.OFFLINE, createdUser.getStatus());
 	}

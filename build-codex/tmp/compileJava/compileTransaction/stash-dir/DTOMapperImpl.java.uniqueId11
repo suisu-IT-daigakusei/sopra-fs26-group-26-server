@@ -1,0 +1,230 @@
+package ch.uzh.ifi.hase.soprafs26.rest.mapper;
+
+import ch.uzh.ifi.hase.soprafs26.entity.Card;
+import ch.uzh.ifi.hase.soprafs26.entity.Game;
+import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
+import ch.uzh.ifi.hase.soprafs26.entity.Session;
+import ch.uzh.ifi.hase.soprafs26.entity.User;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.CardDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.GameStateBroadcastDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbyGetDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.SessionHistoryDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.UserGetDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPostDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPutDTO;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import javax.annotation.processing.Generated;
+
+@Generated(
+    value = "org.mapstruct.ap.MappingProcessor",
+    date = "2026-05-15T13:17:42+0200",
+    comments = "version: 1.5.5.Final, compiler: IncrementalProcessingEnvironment from gradle-language-java-9.2.1.jar, environment: Java 17.0.18 (Oracle Corporation)"
+)
+public class DTOMapperImpl implements DTOMapper {
+
+    @Override
+    public User convertUserPostDTOtoEntity(UserPostDTO userPostDTO) {
+        if ( userPostDTO == null ) {
+            return null;
+        }
+
+        User user = new User();
+
+        user.setName( userPostDTO.getName() );
+        user.setUsername( userPostDTO.getUsername() );
+        user.setPassword( userPostDTO.getPassword() );
+        user.setBio( userPostDTO.getBio() );
+        user.setCreationDate( userPostDTO.getCreationDate() );
+
+        return user;
+    }
+
+    @Override
+    public UserGetDTO convertEntityToUserGetDTO(User user) {
+        if ( user == null ) {
+            return null;
+        }
+
+        UserGetDTO userGetDTO = new UserGetDTO();
+
+        userGetDTO.setId( user.getId() );
+        userGetDTO.setName( user.getName() );
+        userGetDTO.setUsername( user.getUsername() );
+        userGetDTO.setToken( user.getToken() );
+        userGetDTO.setStatus( user.getStatus() );
+        userGetDTO.setBio( user.getBio() );
+        userGetDTO.setCreationDate( user.getCreationDate() );
+        userGetDTO.setGamesWon( user.getGamesWon() );
+        userGetDTO.setRoundsWon( user.getRoundsWon() );
+        userGetDTO.setAverageScorePerSession( user.getAverageScorePerSession() );
+        userGetDTO.setAverageScorePerRound( user.getAverageScorePerRound() );
+        userGetDTO.setOverallRank( user.getOverallRank() );
+        userGetDTO.setIsPublicLog( user.getIsPublicLog() );
+        userGetDTO.setProfileCharacterId( user.getProfileCharacterId() );
+        List<String> list = user.getPreferredColorPriority();
+        if ( list != null ) {
+            userGetDTO.setPreferredColorPriority( new ArrayList<String>( list ) );
+        }
+        userGetDTO.setMenuBackgroundId( user.getMenuBackgroundId() );
+        userGetDTO.setGameBackgroundId( user.getGameBackgroundId() );
+        userGetDTO.setPrimaryColorId( user.getPrimaryColorId() );
+        userGetDTO.setAppearanceMode( user.getAppearanceMode() );
+        userGetDTO.setTutorialsEnabled( user.getTutorialsEnabled() );
+        userGetDTO.setMusicVolume( user.getMusicVolume() );
+        userGetDTO.setSoundEffectsVolume( user.getSoundEffectsVolume() );
+        List<String> list1 = user.getMusicBlacklist();
+        if ( list1 != null ) {
+            userGetDTO.setMusicBlacklist( new ArrayList<String>( list1 ) );
+        }
+
+        return userGetDTO;
+    }
+
+    @Override
+    public User convertUserPutDTOtoEntity(UserPutDTO userPutDTO) {
+        if ( userPutDTO == null ) {
+            return null;
+        }
+
+        User user = new User();
+
+        user.setPassword( userPutDTO.getPassword() );
+        user.setStatus( userPutDTO.getStatus() );
+        user.setIsPublicLog( userPutDTO.getIsPublicLog() );
+        user.setBio( userPutDTO.getBio() );
+        user.setProfileCharacterId( userPutDTO.getProfileCharacterId() );
+        List<String> list = userPutDTO.getPreferredColorPriority();
+        if ( list != null ) {
+            user.setPreferredColorPriority( new ArrayList<String>( list ) );
+        }
+        user.setMenuBackgroundId( userPutDTO.getMenuBackgroundId() );
+        user.setGameBackgroundId( userPutDTO.getGameBackgroundId() );
+        user.setPrimaryColorId( userPutDTO.getPrimaryColorId() );
+        user.setAppearanceMode( userPutDTO.getAppearanceMode() );
+        user.setTutorialsEnabled( userPutDTO.getTutorialsEnabled() );
+        user.setMusicVolume( userPutDTO.getMusicVolume() );
+        user.setSoundEffectsVolume( userPutDTO.getSoundEffectsVolume() );
+        List<String> list1 = userPutDTO.getMusicBlacklist();
+        if ( list1 != null ) {
+            user.setMusicBlacklist( new ArrayList<String>( list1 ) );
+        }
+
+        return user;
+    }
+
+    @Override
+    public SessionHistoryDTO convertEntityToSessionHistoryDTO(Session session) {
+        if ( session == null ) {
+            return null;
+        }
+
+        SessionHistoryDTO sessionHistoryDTO = new SessionHistoryDTO();
+
+        sessionHistoryDTO.setId( session.getId() );
+        sessionHistoryDTO.setSessionId( session.getSessionId() );
+        sessionHistoryDTO.setStartTime( session.getStartTime() );
+        sessionHistoryDTO.setEnded( session.isEnded() );
+        sessionHistoryDTO.setAbsentRoundPoints( session.getAbsentRoundPoints() );
+        List<Map<Long, Integer>> list = session.getUserScoresPerRound();
+        if ( list != null ) {
+            sessionHistoryDTO.setUserScoresPerRound( new ArrayList<Map<Long, Integer>>( list ) );
+        }
+        Map<Long, Integer> map = session.getTotalScoreByUserId();
+        if ( map != null ) {
+            sessionHistoryDTO.setTotalScoreByUserId( new LinkedHashMap<Long, Integer>( map ) );
+        }
+        Map<Long, Boolean> map1 = session.getHundredReductionAppliedByUserId();
+        if ( map1 != null ) {
+            sessionHistoryDTO.setHundredReductionAppliedByUserId( new LinkedHashMap<Long, Boolean>( map1 ) );
+        }
+
+        return sessionHistoryDTO;
+    }
+
+    @Override
+    public List<Card> convertCardDTOListtoEntityList(List<CardDTO> cardDTOs) {
+        if ( cardDTOs == null ) {
+            return null;
+        }
+
+        List<Card> list = new ArrayList<Card>( cardDTOs.size() );
+        for ( CardDTO cardDTO : cardDTOs ) {
+            list.add( convertCardDTOtoEntity( cardDTO ) );
+        }
+
+        return list;
+    }
+
+    @Override
+    public LobbyGetDTO convertEntityToLobbyGetDTO(Lobby lobby) {
+        if ( lobby == null ) {
+            return null;
+        }
+
+        LobbyGetDTO lobbyGetDTO = new LobbyGetDTO();
+
+        lobbyGetDTO.setId( lobby.getId() );
+        lobbyGetDTO.setSessionId( lobby.getSessionId() );
+        lobbyGetDTO.setSessionHostUserId( lobby.getSessionHostUserId() );
+        List<Long> list = lobby.getPlayerIds();
+        if ( list != null ) {
+            lobbyGetDTO.setPlayerIds( new ArrayList<Long>( list ) );
+        }
+        lobbyGetDTO.setIsPublic( lobby.getIsPublic() );
+        lobbyGetDTO.setCurrentRound( lobby.getCurrentRound() );
+        lobbyGetDTO.setStatus( lobby.getStatus() );
+        lobbyGetDTO.setAfkTimeoutSeconds( lobby.getAfkTimeoutSeconds() );
+        lobbyGetDTO.setInitialPeekSeconds( lobby.getInitialPeekSeconds() );
+        lobbyGetDTO.setTurnSeconds( lobby.getTurnSeconds() );
+        lobbyGetDTO.setAbilityRevealSeconds( lobby.getAbilityRevealSeconds() );
+        lobbyGetDTO.setAbilitySwapSeconds( lobby.getAbilitySwapSeconds() );
+        lobbyGetDTO.setWebsocketGraceSeconds( lobby.getWebsocketGraceSeconds() );
+        lobbyGetDTO.setChatCooldownSeconds( lobby.getChatCooldownSeconds() );
+
+        return lobbyGetDTO;
+    }
+
+    @Override
+    public List<LobbyGetDTO> convertEntityListToLobbyGetDTOList(List<Lobby> lobbies) {
+        if ( lobbies == null ) {
+            return null;
+        }
+
+        List<LobbyGetDTO> list = new ArrayList<LobbyGetDTO>( lobbies.size() );
+        for ( Lobby lobby : lobbies ) {
+            list.add( convertEntityToLobbyGetDTO( lobby ) );
+        }
+
+        return list;
+    }
+
+    @Override
+    public List<SessionHistoryDTO> convertEntityListToSessionHistoryDTOList(List<Session> sessionHistory) {
+        if ( sessionHistory == null ) {
+            return null;
+        }
+
+        List<SessionHistoryDTO> list = new ArrayList<SessionHistoryDTO>( sessionHistory.size() );
+        for ( Session session : sessionHistory ) {
+            list.add( convertEntityToSessionHistoryDTO( session ) );
+        }
+
+        return list;
+    }
+
+    @Override
+    public GameStateBroadcastDTO convertEntityToGameStateBroadcastDTO(Game game) {
+        if ( game == null ) {
+            return null;
+        }
+
+        GameStateBroadcastDTO gameStateBroadcastDTO = new GameStateBroadcastDTO();
+
+        gameStateBroadcastDTO.setResumedFromSessionId( game.getResumedFromSessionId() );
+
+        return gameStateBroadcastDTO;
+    }
+}

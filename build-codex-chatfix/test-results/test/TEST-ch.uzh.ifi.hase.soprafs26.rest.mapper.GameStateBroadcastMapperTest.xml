@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-05-15T11:48:43.001Z" hostname="BLUE_MONKEYS_GC" time="0.975">
+  <properties/>
+  <testcase name="roundEndedOrAwaitingRematch_allHandValuesRevealedToOpponentViewer()" classname="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" time="0.946"/>
+  <testcase name="ownerVisibleCard_showsValueAndCode()" classname="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" time="0.005"/>
+  <testcase name="opponentPeekNineTen_spySeesPeekedCard_ownerDoesNot()" classname="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" time="0.003"/>
+  <testcase name="caboReveal_drawnCardRevealedToNonCurrentPlayer()" classname="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" time="0.004"/>
+  <testcase name="roundEndedOrAwaitingRematch_drawnCardRevealedToAllViewers()" classname="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" time="0.003"/>
+  <testcase name="gameStateAfterSwapWithDiscard_broadcastGameState_discardTopVisible_handCardFromDiscardHiddenForAllViewers()" classname="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" time="0.005"/>
+  <testcase name="twoViewers_drawCountOnly_opponentHandSecretsHidden()" classname="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" time="0.002"/>
+  <testcase name="twoVisibleCardsOnPlayer1Hand_player2SeesNoValues()" classname="ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapperTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

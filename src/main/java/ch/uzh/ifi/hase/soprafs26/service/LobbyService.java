@@ -43,6 +43,7 @@ public class LobbyService {
     private final OnlineUsersEventPublisher onlineUsersEventPublisher;
     private final DisconnectService disconnectService;
     private final GameService gameService;
+    private final LobbyChatService lobbyChatService;
     private final LobbySettingsProperties lobbySettings;
     // Players that timed out while being in a PLAYING lobby.
     // They stay part of the active game and trigger an automatic Cabo when their turn starts.
@@ -80,7 +81,8 @@ public class LobbyService {
                         OnlineUsersEventPublisher onlineUsersEventPublisher,
                         LobbySettingsProperties lobbySettings,
                         @Lazy DisconnectService disconnectService,
-                        @Lazy GameService gameService) {
+                        @Lazy GameService gameService,
+                        @Lazy LobbyChatService lobbyChatService) {
         this.lobbyRepository = lobbyRepository;
         this.gameRepository = gameRepository;
         this.userRepository = userRepository;
@@ -89,6 +91,7 @@ public class LobbyService {
         this.lobbySettings = lobbySettings;
         this.disconnectService = disconnectService;
         this.gameService = gameService;
+        this.lobbyChatService = lobbyChatService;
     }
 
     // helper: look up user by token, throw 401 if invalid
@@ -427,6 +430,16 @@ public class LobbyService {
             changed = true;
         }
 
+        long normalizedChatCooldown = normalizeTimerValue(
+                lobby.getChatCooldownSeconds(),
+                lobbySettings.getChatCooldownMinSeconds(),
+                lobbySettings.getChatCooldownMaxSeconds(),
+                lobbySettings.getChatCooldownDefaultSeconds());
+        if (!Long.valueOf(normalizedChatCooldown).equals(lobby.getChatCooldownSeconds())) {
+            lobby.setChatCooldownSeconds(normalizedChatCooldown);
+            changed = true;
+        }
+
         return changed;
     }
 
@@ -441,6 +454,7 @@ public class LobbyService {
         lobby.setAbilitySwapSeconds(lobbySettings.getAbilitySwapDefaultSeconds());
         lobby.setAbsentRoundPoints(lobbySettings.getAbsentRoundPointsDefault());
         lobby.setWebsocketGraceSeconds(lobbySettings.getWebsocketGraceDefaultSeconds());
+        lobby.setChatCooldownSeconds(lobbySettings.getChatCooldownDefaultSeconds());
     }
 
     // generates a unique sessionId
@@ -745,6 +759,7 @@ public class LobbyService {
         dto.setAbilitySwapSeconds(lobby.getAbilitySwapSeconds());
         dto.setAbsentRoundPoints(lobby.getAbsentRoundPoints());
         dto.setWebsocketGraceSeconds(lobby.getWebsocketGraceSeconds());
+        dto.setChatCooldownSeconds(lobby.getChatCooldownSeconds());
         dto.setViewerIsHost(user.getId().equals(hostId));
 
         Map<Long, String> assignedCharacterColorByUserId = lobby.getAssignedCharacterColorByUserId() == null
@@ -857,7 +872,8 @@ public class LobbyService {
                 || body.getAbilityRevealSeconds() != null
                 || body.getAbilitySwapSeconds() != null
                 || body.getAbsentRoundPoints() != null
-                || body.getWebsocketGraceSeconds() != null;
+                || body.getWebsocketGraceSeconds() != null
+                || body.getChatCooldownSeconds() != null;
         if (!hasAnySetting) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No settings to update");
         }
@@ -923,6 +939,13 @@ public class LobbyService {
                     lobbySettings.getWebsocketGraceMinSeconds(),
                     lobbySettings.getWebsocketGraceMaxSeconds());
             lobby.setWebsocketGraceSeconds(value);
+        }
+        if (body.getChatCooldownSeconds() != null) {
+            long value = clamp(
+                    body.getChatCooldownSeconds(),
+                    lobbySettings.getChatCooldownMinSeconds(),
+                    lobbySettings.getChatCooldownMaxSeconds());
+            lobby.setChatCooldownSeconds(value);
         }
         normalizeLobbySettingsInPlace(lobby);
         lobby = lobbyRepository.save(lobby);
@@ -1142,6 +1165,7 @@ public class LobbyService {
         Long templateAbilitySwapSeconds = currentLobby.getAbilitySwapSeconds();
         Long templateAbsentRoundPoints = currentLobby.getAbsentRoundPoints();
         Long templateWebsocketGraceSeconds = currentLobby.getWebsocketGraceSeconds();
+        Long templateChatCooldownSeconds = currentLobby.getChatCooldownSeconds();
 
         String continueLobbySessionId = null;
         if (!effectiveContinuePlayers.isEmpty()) {
@@ -1160,7 +1184,11 @@ public class LobbyService {
             List<Long> spectators = currentLobby.getSpectatorIds() != null
                     ? new ArrayList<>(currentLobby.getSpectatorIds())
                     : List.of();
+            String endedSessionId = currentLobby.getSessionId();
             lobbyRepository.delete(currentLobby);
+            if (lobbyChatService != null) {
+                lobbyChatService.clearSessionMessages(endedSessionId);
+            }
             setUsersStatus(spectators, UserStatus.ONLINE);
         }
 
@@ -1180,6 +1208,7 @@ public class LobbyService {
             freshLobby.setAbilitySwapSeconds(templateAbilitySwapSeconds);
             freshLobby.setAbsentRoundPoints(templateAbsentRoundPoints);
             freshLobby.setWebsocketGraceSeconds(templateWebsocketGraceSeconds);
+            freshLobby.setChatCooldownSeconds(templateChatCooldownSeconds);
             resetLobbyReadyStateForWaiting(freshLobby);
             normalizeLobbyPlayerStateInPlace(freshLobby);
             freshLobby = lobbyRepository.save(freshLobby);

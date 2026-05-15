@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-05-15T11:17:52.719Z" hostname="BLUE_MONKEYS_GC" time="0.368">
+  <properties/>
+  <testcase name="getMessages_invalidToken_unauthorized()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.324"/>
+  <testcase name="sendMessage_defaultCooldownAppliesWhenLobbyCooldownMissing()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.008"/>
+  <testcase name="sendMessage_sentTooFast_throwsTooManyRequests()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.002"/>
+  <testcase name="clearSessionMessages_removesHistoryForSession()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.003"/>
+  <testcase name="sendMessage_nonAscii_throwsBadRequest()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.004"/>
+  <testcase name="sendMessage_secondUserDoesNotShareCooldown()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.002"/>
+  <testcase name="sendMessage_multiLine_throwsBadRequest()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.003"/>
+  <testcase name="sendMessage_userOutsideLobby_forbidden()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.004"/>
+  <testcase name="sendMessage_missingMessage_throwsBadRequest()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.003"/>
+  <testcase name="sendMessage_overMaxLength_throwsBadRequest()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.005"/>
+  <testcase name="sendMessage_validMessage_publishesAndCanResync()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.006"/>
+  <testcase name="sendMessage_spectatorIsAllowed()" classname="ch.uzh.ifi.hase.soprafs26.service.LobbyChatServiceTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

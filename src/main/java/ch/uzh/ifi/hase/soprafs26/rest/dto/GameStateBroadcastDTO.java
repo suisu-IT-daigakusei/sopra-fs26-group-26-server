@@ -11,6 +11,7 @@ import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 public class GameStateBroadcastDTO {
 
     private String gameId;
+    private String sessionId;
     private GameStatus status;
     private int drawPileCount;
     private Long currentTurnUserId;
@@ -35,6 +36,14 @@ public class GameStateBroadcastDTO {
 
     public void setGameId(String gameId) {
         this.gameId = gameId;
+    }
+
+    public String getSessionId() {
+        return sessionId;
+    }
+
+    public void setSessionId(String sessionId) {
+        this.sessionId = sessionId;
     }
 
     public GameStatus getStatus() {
