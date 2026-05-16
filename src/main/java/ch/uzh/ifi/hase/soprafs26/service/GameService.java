@@ -2241,7 +2241,6 @@ public class GameService {
             int maxRounds = gameSettings.getRoundLimit();
             int maxScore = gameSettings.getScoreLimit();
 
-            // Null check order fixed here!
             if (session.getUserScoresPerRound() != null && session.getUserScoresPerRound().size() >= maxRounds) {
                 return true;
             }
