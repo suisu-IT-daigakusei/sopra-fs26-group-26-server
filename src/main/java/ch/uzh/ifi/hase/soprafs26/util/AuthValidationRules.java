@@ -11,12 +11,12 @@ public final class AuthValidationRules {
 
     public static final int PASSWORD_MIN_LENGTH = 8;
     public static final int PASSWORD_MAX_LENGTH = 32;
-    public static final String PASSWORD_REGEX = "^(?=.*[A-Z])(?=.*[^A-Za-z0-9])[\\x21-\\x7E]{8,32}$";
-    public static final String PASSWORD_ALLOWED_CHAR_REGEX = "[\\x21-\\x7E]";
+    public static final String CREDENTIAL_FORMAT_REGEX = "^(?=.*[A-Z])(?=.*[^A-Za-z0-9])[\\x21-\\x7E]{8,32}$";
+    public static final String CREDENTIAL_ALLOWED_CHAR_REGEX = "[\\x21-\\x7E]";
     public static final String PASSWORD_HINT = "Password must be 8-32 characters, ASCII only (no spaces), include at least one uppercase letter and one special symbol.";
 
     public static final Pattern USERNAME_PATTERN = Pattern.compile(USERNAME_REGEX);
-    public static final Pattern PASSWORD_PATTERN = Pattern.compile(PASSWORD_REGEX);
+    public static final Pattern CREDENTIAL_FORMAT_PATTERN = Pattern.compile(CREDENTIAL_FORMAT_REGEX);
 
     private AuthValidationRules() {
     }

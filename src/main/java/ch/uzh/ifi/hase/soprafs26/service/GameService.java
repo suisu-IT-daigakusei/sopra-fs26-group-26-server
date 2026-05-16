@@ -1,5 +1,7 @@
 package ch.uzh.ifi.hase.soprafs26.service;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.ArrayList;
@@ -46,6 +48,9 @@ import org.springframework.context.ApplicationEventPublisher;
 // added TEMPORARY FALLBACK, SINCE DECKAPI IS UNRELIABLE FOR TESTING
 @Service
 public class GameService {
+
+    private static final Logger log = LoggerFactory.getLogger(GameService.class);
+
     public static final String REMATCH_DECISION_CONTINUE = "CONTINUE";
     public static final String REMATCH_DECISION_FRESH = "FRESH";
     public static final String REMATCH_DECISION_NONE = "NONE";
@@ -2230,8 +2235,7 @@ public class GameService {
 
             return isGameOver;
         } catch (Exception e) {
-            System.err.println("Critical error during scoring pipeline: " + e.getMessage());
-            e.printStackTrace();
+            log.error("Critical error during scoring pipeline", e);
             return false;
         }
     }
@@ -2255,7 +2259,7 @@ public class GameService {
 
             return false;
         } catch (Exception e) {
-            System.err.println("Error checking game over conditions: " + e.getMessage());
+            log.error("Error checking game over conditions", e);
             return false;
         }
     }
@@ -2316,8 +2320,8 @@ public class GameService {
             userRepository.saveAll(participants);
 
         } catch (Exception e) {
-            System.err.println("Error updating user statistics at session end: " + e.getMessage());
-            e.printStackTrace();
+            log.error("Error updating user statistics at session end", e);
         }
     }
-}   
+}
+

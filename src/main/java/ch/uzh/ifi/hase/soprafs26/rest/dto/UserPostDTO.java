@@ -32,7 +32,7 @@ public class UserPostDTO {
             message = "Password must be between 8 and 32 characters long"
     )
     @Pattern(
-            regexp = AuthValidationRules.PASSWORD_REGEX,
+            regexp = AuthValidationRules.CREDENTIAL_FORMAT_REGEX,
             message = "Password must include 1 uppercase, 1 special symbol, and only ASCII characters (no spaces)"
     )
     private String password;

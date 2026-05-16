@@ -129,8 +129,8 @@ public class UserController {
         AuthRulesDTO.PasswordRulesDTO passwordRules = new AuthRulesDTO.PasswordRulesDTO();
         passwordRules.setMinLength(AuthValidationRules.PASSWORD_MIN_LENGTH);
         passwordRules.setMaxLength(AuthValidationRules.PASSWORD_MAX_LENGTH);
-        passwordRules.setPattern(AuthValidationRules.PASSWORD_REGEX);
-        passwordRules.setAllowedCharactersPattern(AuthValidationRules.PASSWORD_ALLOWED_CHAR_REGEX);
+        passwordRules.setPattern(AuthValidationRules.CREDENTIAL_FORMAT_REGEX);
+        passwordRules.setAllowedCharactersPattern(AuthValidationRules.CREDENTIAL_ALLOWED_CHAR_REGEX);
         passwordRules.setHint(AuthValidationRules.PASSWORD_HINT);
         passwordRules.setAsciiOnly(true);
         passwordRules.setRequiresUppercase(true);

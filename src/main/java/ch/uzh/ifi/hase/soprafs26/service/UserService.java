@@ -160,7 +160,7 @@ public class UserService {
                 || password.length() > AuthValidationRules.PASSWORD_MAX_LENGTH) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, AuthValidationRules.PASSWORD_HINT);
         }
-        if (!AuthValidationRules.PASSWORD_PATTERN.matcher(password).matches()) {
+        if (!AuthValidationRules.CREDENTIAL_FORMAT_PATTERN.matcher(password).matches()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, AuthValidationRules.PASSWORD_HINT);
         }
     }
