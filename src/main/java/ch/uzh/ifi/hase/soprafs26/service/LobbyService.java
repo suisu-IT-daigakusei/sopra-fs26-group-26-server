@@ -501,6 +501,17 @@ public class LobbyService {
         return playerIds;
     }
 
+    public Optional<Lobby> findLatestPlayingLobbyForSpectator(Long userId) {
+        if (userId == null) {
+            return Optional.empty();
+        }
+        return lobbyRepository.findByStatusAndParticipantId("PLAYING", userId).stream()
+                .filter(lobby -> lobby != null
+                        && lobby.getSpectatorIds() != null
+                        && lobby.getSpectatorIds().contains(userId))
+                .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)));
+    }
+
     public Long findWebsocketGraceSecondsForUser(Long userId) {
         if (userId == null) {
             return null;
@@ -562,6 +573,170 @@ public class LobbyService {
                 .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)))
                 .map(Lobby::getSessionId)
                 .orElse(null);
+    }
+
+    private boolean isLobbyNewer(Lobby candidate, Lobby reference) {
+        if (candidate == null) {
+            return false;
+        }
+        if (reference == null) {
+            return true;
+        }
+        Long candidateId = candidate.getId();
+        Long referenceId = reference.getId();
+        if (candidateId != null && referenceId != null) {
+            return candidateId > referenceId;
+        }
+        if (candidateId != null) {
+            return true;
+        }
+        if (referenceId != null) {
+            return false;
+        }
+        String candidateSessionId = candidate.getSessionId() == null ? "" : candidate.getSessionId();
+        String referenceSessionId = reference.getSessionId() == null ? "" : reference.getSessionId();
+        return candidateSessionId.compareTo(referenceSessionId) > 0;
+    }
+
+    private Set<Long> toRequestedUserIdSet(List<Long> userIds) {
+        if (userIds == null || userIds.isEmpty()) {
+            return Set.of();
+        }
+        Set<Long> requestedUserIds = new LinkedHashSet<>();
+        for (Long userId : userIds) {
+            if (userId != null) {
+                requestedUserIds.add(userId);
+            }
+        }
+        return requestedUserIds;
+    }
+
+    private Map<Long, Lobby> resolveNewestJoinableLobbyByUserId(Set<Long> requestedUserIds) {
+        if (requestedUserIds == null || requestedUserIds.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<Long, Lobby> newestPlayingLobbyByUserId = new HashMap<>();
+        Map<Long, Lobby> newestWaitingLobbyByUserId = new HashMap<>();
+
+        List<Lobby> playingLobbies = lobbyRepository.findByStatus("PLAYING");
+        for (Lobby lobby : playingLobbies) {
+            if (lobby == null) {
+                continue;
+            }
+            List<Long> participantIds = new ArrayList<>();
+            if (lobby.getPlayerIds() != null) {
+                participantIds.addAll(lobby.getPlayerIds());
+            }
+            if (lobby.getSpectatorIds() != null) {
+                participantIds.addAll(lobby.getSpectatorIds());
+            }
+            for (Long participantId : participantIds) {
+                if (participantId == null || !requestedUserIds.contains(participantId)) {
+                    continue;
+                }
+                Lobby knownLobby = newestPlayingLobbyByUserId.get(participantId);
+                if (isLobbyNewer(lobby, knownLobby)) {
+                    newestPlayingLobbyByUserId.put(participantId, lobby);
+                }
+            }
+        }
+
+        List<Lobby> waitingLobbies = lobbyRepository.findByStatus("WAITING");
+        for (Lobby lobby : waitingLobbies) {
+            if (lobby == null) {
+                continue;
+            }
+            List<Long> participantIds = new ArrayList<>();
+            if (lobby.getPlayerIds() != null) {
+                participantIds.addAll(lobby.getPlayerIds());
+            }
+            if (lobby.getSpectatorIds() != null) {
+                participantIds.addAll(lobby.getSpectatorIds());
+            }
+            for (Long participantId : participantIds) {
+                if (participantId == null || !requestedUserIds.contains(participantId)) {
+                    continue;
+                }
+                Lobby knownLobby = newestWaitingLobbyByUserId.get(participantId);
+                if (isLobbyNewer(lobby, knownLobby)) {
+                    newestWaitingLobbyByUserId.put(participantId, lobby);
+                }
+            }
+        }
+
+        Map<Long, Lobby> selectedLobbyByUserId = new HashMap<>();
+        for (Long userId : requestedUserIds) {
+            Lobby playingLobby = newestPlayingLobbyByUserId.get(userId);
+            if (playingLobby != null) {
+                selectedLobbyByUserId.put(userId, playingLobby);
+                continue;
+            }
+            Lobby waitingLobby = newestWaitingLobbyByUserId.get(userId);
+            if (waitingLobby != null) {
+                selectedLobbyByUserId.put(userId, waitingLobby);
+            }
+        }
+        return selectedLobbyByUserId;
+    }
+
+    public Map<Long, String> resolveJoinableSessionIdsForUsers(List<Long> userIds) {
+        Set<Long> requestedUserIds = toRequestedUserIdSet(userIds);
+        if (requestedUserIds.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<Long, Lobby> newestLobbyByUserId = resolveNewestJoinableLobbyByUserId(requestedUserIds);
+        Map<Long, String> joinableSessionIdByUserId = new HashMap<>();
+        for (Map.Entry<Long, Lobby> entry : newestLobbyByUserId.entrySet()) {
+            String sessionId = entry.getValue() == null ? null : entry.getValue().getSessionId();
+            if (sessionId == null || sessionId.isBlank()) {
+                continue;
+            }
+            joinableSessionIdByUserId.put(entry.getKey(), sessionId);
+        }
+        return joinableSessionIdByUserId;
+    }
+
+    public String resolveJoinableSessionIdForUser(Long userId) {
+        if (userId == null) {
+            return null;
+        }
+        return resolveJoinableSessionIdsForUsers(List.of(userId)).get(userId);
+    }
+
+    public Map<Long, UserStatus> resolveLobbyPresenceStatusForUsers(List<Long> userIds) {
+        Set<Long> requestedUserIds = toRequestedUserIdSet(userIds);
+        if (requestedUserIds.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<Long, Lobby> newestLobbyByUserId = resolveNewestJoinableLobbyByUserId(requestedUserIds);
+        Map<Long, UserStatus> statusByUserId = new HashMap<>();
+
+        for (Map.Entry<Long, Lobby> entry : newestLobbyByUserId.entrySet()) {
+            Long userId = entry.getKey();
+            Lobby lobby = entry.getValue();
+            if (userId == null || lobby == null) {
+                continue;
+            }
+            boolean isSpectator = lobby.getSpectatorIds() != null && lobby.getSpectatorIds().contains(userId);
+            if ("PLAYING".equals(lobby.getStatus())) {
+                statusByUserId.put(userId, isSpectator ? UserStatus.SPECTATING : UserStatus.PLAYING);
+                continue;
+            }
+            if ("WAITING".equals(lobby.getStatus())) {
+                statusByUserId.put(userId, isSpectator ? UserStatus.SPECTATING : UserStatus.LOBBY);
+            }
+        }
+        return statusByUserId;
+    }
+
+    public UserStatus resolveLobbyPresenceStatusForUser(Long userId) {
+        if (userId == null) {
+            return null;
+        }
+        return resolveLobbyPresenceStatusForUsers(List.of(userId)).get(userId);
     }
 
     /**
@@ -703,10 +878,12 @@ public class LobbyService {
     }
 
     public Lobby getMyWaitingLobbyAsHost(String token) {
-        User host = getUserByToken(token);
-        return lobbyRepository.findBySessionHostUserId(host.getId()).stream()
-                .filter(l -> "WAITING".equals(l.getStatus()))
-                .findFirst()
+        User requester = getUserByToken(token);
+        return lobbyRepository.findByStatusAndParticipantId("WAITING", requester.getId()).stream()
+                .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)))
+                .or(() -> lobbyRepository.findBySessionHostUserId(requester.getId()).stream()
+                        .filter(l -> "WAITING".equals(l.getStatus()))
+                        .findFirst())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No waiting lobby"));
     }
 
@@ -1164,6 +1341,12 @@ public class LobbyService {
         List<Long> effectiveFreshPlayers = normalizedFreshPlayers.size() >= 2
                 ? normalizedFreshPlayers
                 : List.of();
+        List<Long> currentSpectators = currentLobby.getSpectatorIds() == null
+                ? List.of()
+                : currentLobby.getSpectatorIds().stream()
+                        .filter(id -> id != null)
+                        .distinct()
+                        .toList();
 
         Boolean templateIsPublic = Boolean.TRUE.equals(currentLobby.getIsPublic());
         Long templateAfkTimeoutSeconds = currentLobby.getAfkTimeoutSeconds();
@@ -1175,6 +1358,7 @@ public class LobbyService {
         Long templateWebsocketGraceSeconds = currentLobby.getWebsocketGraceSeconds();
         Long templateChatCooldownSeconds = currentLobby.getChatCooldownSeconds();
 
+        List<Long> spectatorsToReleaseOnline = List.of();
         String continueLobbySessionId = null;
         if (!effectiveContinuePlayers.isEmpty()) {
             currentLobby.setStatus("WAITING");
@@ -1188,16 +1372,12 @@ public class LobbyService {
             setUsersStatus(effectiveContinuePlayers, UserStatus.LOBBY);
             lobbyEventPublisher.broadcastLobbyUpdate(currentLobby.getId(), currentLobby);
         } else {
-            // if no rematch - set spectators' status from SPECTATING to ONLINE
-            List<Long> spectators = currentLobby.getSpectatorIds() != null
-                    ? new ArrayList<>(currentLobby.getSpectatorIds())
-                    : List.of();
             String endedSessionId = currentLobby.getSessionId();
             lobbyRepository.delete(currentLobby);
             if (lobbyChatService != null) {
                 lobbyChatService.clearSessionMessages(endedSessionId);
             }
-            setUsersStatus(spectators, UserStatus.ONLINE);
+            spectatorsToReleaseOnline = currentSpectators;
         }
 
         String freshLobbySessionId = null;
@@ -1212,6 +1392,10 @@ public class LobbyService {
             freshLobby.setIsPublic(templateIsPublic);
             freshLobby.setStatus("WAITING");
             freshLobby.setPlayerIds(new ArrayList<>(effectiveFreshPlayers));
+            boolean shouldCarrySpectatorsToFreshLobby = effectiveContinuePlayers.isEmpty() && !currentSpectators.isEmpty();
+            if (shouldCarrySpectatorsToFreshLobby) {
+                freshLobby.setSpectatorIds(new ArrayList<>(currentSpectators));
+            }
             freshLobby.setKickedUserIds(new ArrayList<>());
             freshLobby.setAfkTimeoutSeconds(templateAfkTimeoutSeconds);
             freshLobby.setInitialPeekSeconds(templateInitialPeekSeconds);
@@ -1226,7 +1410,14 @@ public class LobbyService {
             freshLobby = lobbyRepository.save(freshLobby);
             freshLobbySessionId = freshLobby.getSessionId();
             setUsersStatus(effectiveFreshPlayers, UserStatus.LOBBY);
+            if (shouldCarrySpectatorsToFreshLobby) {
+                setUsersStatus(currentSpectators, UserStatus.SPECTATING);
+                spectatorsToReleaseOnline = List.of();
+            }
             lobbyEventPublisher.broadcastLobbyUpdate(freshLobby.getId(), freshLobby);
+        }
+        if (!spectatorsToReleaseOnline.isEmpty()) {
+            setUsersStatus(spectatorsToReleaseOnline, UserStatus.ONLINE);
         }
 
         for (Long continuePlayerId : effectiveContinuePlayers) {
@@ -1245,18 +1436,39 @@ public class LobbyService {
         onlineUsersEventPublisher.broadcastOnlineUsers();
     }
 
-    // lookup of matching PLAYING status lobby while round-end resolve is in progress (same player set)
-    public String findPlayingSessionIdForPlayers(List<Long> gamePlayerIds) {
+    private Lobby findBestPlayingLobbyForPlayers(List<Long> gamePlayerIds) {
         if (gamePlayerIds == null || gamePlayerIds.isEmpty()) {
             return null;
         }
-        Set<Long> expectedPlayers = new LinkedHashSet<>(gamePlayerIds);
-        return lobbyRepository.findByStatus("PLAYING").stream()
+        Set<Long> expectedPlayerSet = new LinkedHashSet<>(gamePlayerIds);
+        List<Lobby> playingLobbies = lobbyRepository.findByStatus("PLAYING");
+        return playingLobbies.stream()
                 .filter(lobby -> lobby.getPlayerIds() != null)
-                .filter(lobby -> new LinkedHashSet<>(lobby.getPlayerIds()).equals(expectedPlayers))
-                .map(Lobby::getSessionId)
+                .filter(lobby -> new LinkedHashSet<>(lobby.getPlayerIds()).equals(expectedPlayerSet))
                 .findFirst()
-                .orElse(null);
+                .orElseGet(() -> playingLobbies.stream()
+                        .filter(lobby -> lobby.getPlayerIds() != null
+                                && !Collections.disjoint(lobby.getPlayerIds(), expectedPlayerSet))
+                        .max(Comparator.comparingInt(lobby ->
+                                (int) lobby.getPlayerIds().stream().filter(expectedPlayerSet::contains).count()))
+                        .orElse(null));
+    }
+
+    // lookup of matching PLAYING status lobby while round-end resolve is in progress (same player set)
+    public String findPlayingSessionIdForPlayers(List<Long> gamePlayerIds) {
+        Lobby matchingLobby = findBestPlayingLobbyForPlayers(gamePlayerIds);
+        return matchingLobby == null ? null : matchingLobby.getSessionId();
+    }
+
+    public List<Long> findPlayingSpectatorIdsForPlayers(List<Long> gamePlayerIds) {
+        Lobby matchingLobby = findBestPlayingLobbyForPlayers(gamePlayerIds);
+        if (matchingLobby == null || matchingLobby.getSpectatorIds() == null) {
+            return List.of();
+        }
+        return matchingLobby.getSpectatorIds().stream()
+                .filter(id -> id != null)
+                .distinct()
+                .toList();
     }
 
     // GET /lobbies — get all public lobbies
@@ -1306,6 +1518,23 @@ public class LobbyService {
         return lobby;
     }
 
+
+    private void deleteLobbyAndReleaseSpectatorsIfAny(Lobby lobby) {
+        if (lobby == null) {
+            return;
+        }
+        List<Long> spectatorIds = lobby.getSpectatorIds() != null
+                ? new ArrayList<>(lobby.getSpectatorIds())
+                : List.of();
+        String sessionId = lobby.getSessionId();
+        lobbyRepository.delete(lobby);
+        if (lobbyChatService != null && sessionId != null && !sessionId.isBlank()) {
+            lobbyChatService.clearSessionMessages(sessionId);
+        }
+        if (!spectatorIds.isEmpty()) {
+            setUsersStatus(spectatorIds, UserStatus.ONLINE);
+        }
+    }
     // remove player from lobby — self leave or host kick
     @Transactional
     public Lobby removePlayerFromLobby(String sessionId, String token, Long targetUserId) {
@@ -1349,11 +1578,9 @@ public class LobbyService {
         }
 
         // if no players & no spectators left — delete the lobby
-        boolean noPlayers = lobby.getPlayerIds().isEmpty();
-        boolean noSpectators = (lobby.getSpectatorIds() == null || lobby.getSpectatorIds().isEmpty());
-
-        if (noPlayers && noSpectators) {
-            lobbyRepository.delete(lobby);
+        boolean noPlayers = lobby.getPlayerIds() == null || lobby.getPlayerIds().isEmpty();
+        if (noPlayers) {
+            deleteLobbyAndReleaseSpectatorsIfAny(lobby);
             onlineUsersEventPublisher.broadcastOnlineUsers();
             return null;
         }
@@ -1422,11 +1649,10 @@ public class LobbyService {
         }
         clearTimedOutPlayingFlag(userId);
 
-        boolean noPlayers = lobby.getPlayerIds().isEmpty();
-        boolean noSpectators = (lobby.getSpectatorIds() == null || lobby.getSpectatorIds().isEmpty());
+        boolean noPlayers = lobby.getPlayerIds() == null || lobby.getPlayerIds().isEmpty();
 
-        if (noPlayers && noSpectators) {
-            lobbyRepository.delete(lobby);
+        if (noPlayers) {
+            deleteLobbyAndReleaseSpectatorsIfAny(lobby);
         } else {
             if (lobby.getSessionHostUserId().equals(userId) && !lobby.getPlayerIds().isEmpty()) {
                 lobby.setSessionHostUserId(lobby.getPlayerIds().get(0));
@@ -1438,20 +1664,36 @@ public class LobbyService {
         onlineUsersEventPublisher.broadcastOnlineUsers();
     }
 
-    public void removeSpectator(String sessionId, Long userId) {
-        Lobby lobby = lobbyRepository.findBySessionId(sessionId);
-        if (lobby == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Lobby not found");
+    @Transactional
+    public Lobby removeSpectatorFromLobby(String sessionId, String token, Long targetUserId) {
+        User requester = getUserByToken(token);
+        Lobby lobby = getLobbyBySessionId(sessionId);
+
+        boolean isSelf = requester.getId().equals(targetUserId);
+        boolean isHost = requester.getId().equals(lobby.getSessionHostUserId());
+        if (!isSelf && !isHost) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Forbidden!");
         }
 
-        if (lobby.getSpectatorIds() == null || !lobby.getSpectatorIds().contains(userId)) {
-            return;
+        if (lobby.getSpectatorIds() == null || !lobby.getSpectatorIds().contains(targetUserId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "User is not a spectator in this lobby");
         }
-        lobby.getSpectatorIds().remove(userId);
-        setUserStatus(userId, UserStatus.ONLINE);
-        lobbyRepository.save(lobby);
-        lobbyRepository.flush();
+
+        lobby.getSpectatorIds().remove(targetUserId);
+        clearTimedOutPlayingFlag(targetUserId);
+        setUserStatus(targetUserId, UserStatus.ONLINE);
+
+        boolean noPlayers = lobby.getPlayerIds() == null || lobby.getPlayerIds().isEmpty();
+        if (noPlayers) {
+            deleteLobbyAndReleaseSpectatorsIfAny(lobby);
+            onlineUsersEventPublisher.broadcastOnlineUsers();
+            return null;
+        }
+
+        lobby = lobbyRepository.save(lobby);
         lobbyEventPublisher.broadcastLobbyUpdate(lobby.getId(), lobby);
         onlineUsersEventPublisher.broadcastOnlineUsers();
+        return lobby;
     }
 }
+

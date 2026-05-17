@@ -128,4 +128,17 @@ public class LobbyController {
         // Map the updated entity to your existing DTO
         return DTOMapper.INSTANCE.convertEntityToLobbyGetDTO(updatedLobby);
     }
+
+    @DeleteMapping("/lobbies/{sessionId}/spectators/{userId}")
+    @ResponseStatus(HttpStatus.OK)
+    public LobbyGetDTO removeSpectatorFromLobby(@PathVariable String sessionId,
+                                                @RequestHeader("Authorization") String token,
+                                                @PathVariable Long userId) {
+        Lobby updatedLobby = lobbyService.removeSpectatorFromLobby(sessionId, token, userId);
+        if (updatedLobby == null) {
+            return null;
+        }
+        return DTOMapper.INSTANCE.convertEntityToLobbyGetDTO(updatedLobby);
+    }
 }
+

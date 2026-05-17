@@ -1464,13 +1464,82 @@ public class GameService {
         }
     }
 
+    private boolean isActiveGame(Game game) {
+        return game != null && game.getStatus() != GameStatus.ROUND_ENDED;
+    }
+
+    private Set<Long> toPlayerSet(List<Long> playerIds) {
+        Set<Long> sanitized = new LinkedHashSet<>();
+        if (playerIds == null) {
+            return sanitized;
+        }
+        for (Long playerId : playerIds) {
+            if (playerId != null) {
+                sanitized.add(playerId);
+            }
+        }
+        return sanitized;
+    }
+
+    private Optional<Game> findActiveGameMatchingLobbyPlayers(List<Long> lobbyPlayerIds) {
+        Set<Long> expectedPlayerIds = toPlayerSet(lobbyPlayerIds);
+        if (expectedPlayerIds.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Long anchorPlayerId = expectedPlayerIds.iterator().next();
+        List<Game> candidates = gameRepository.findGamesByPlayerId(anchorPlayerId);
+        if (candidates == null || candidates.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Game bestOverlapGame = null;
+        int bestOverlapCount = 0;
+        for (Game candidate : candidates) {
+            if (!isActiveGame(candidate)) {
+                continue;
+            }
+            List<Long> orderedPlayerIds = candidate.getOrderedPlayerIds();
+            if (orderedPlayerIds == null || !orderedPlayerIds.contains(anchorPlayerId)) {
+                continue;
+            }
+            Set<Long> candidatePlayerIds = toPlayerSet(orderedPlayerIds);
+            if (candidatePlayerIds.equals(expectedPlayerIds)) {
+                return Optional.of(candidate);
+            }
+
+            int overlapCount = 0;
+            for (Long candidatePlayerId : candidatePlayerIds) {
+                if (expectedPlayerIds.contains(candidatePlayerId)) {
+                    overlapCount++;
+                }
+            }
+            if (overlapCount > bestOverlapCount) {
+                bestOverlapCount = overlapCount;
+                bestOverlapGame = candidate;
+            }
+        }
+        return Optional.ofNullable(bestOverlapGame);
+    }
+
+    private Optional<Game> findActiveGameForSpectator(Long userId) {
+        if (userId == null || lobbyService == null) {
+            return Optional.empty();
+        }
+        Optional<Lobby> playingLobbyForSpectator = lobbyService.findLatestPlayingLobbyForSpectator(userId);
+        if (playingLobbyForSpectator.isEmpty()) {
+            return Optional.empty();
+        }
+        return findActiveGameMatchingLobbyPlayers(playingLobbyForSpectator.get().getPlayerIds());
+    }
+
     public Optional<Game> findActiveGameForUser(Long userId) {
         if (userId == null) {
             return Optional.empty();
         }
 
         return gameRepository.findGamesByPlayerId(userId).stream()
-                .filter(game -> game != null && game.getStatus() != GameStatus.ROUND_ENDED)
+                .filter(this::isActiveGame)
                 .filter(game -> game.getOrderedPlayerIds() != null && game.getOrderedPlayerIds().contains(userId))
                 .findFirst();
     }
@@ -1483,7 +1552,8 @@ public class GameService {
         if (user == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
         }
-        return findActiveGameForUser(user.getId());
+        return findActiveGameForUser(user.getId())
+                .or(() -> findActiveGameForSpectator(user.getId()));
     }
 
     // Convenience method for callers that only know the user (e.g., lobby kicks/disconnect handling)
@@ -2324,4 +2394,3 @@ public class GameService {
         }
     }
 }
-

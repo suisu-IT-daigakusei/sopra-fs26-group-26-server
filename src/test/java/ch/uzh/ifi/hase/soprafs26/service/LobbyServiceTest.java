@@ -637,6 +637,34 @@ public class LobbyServiceTest {
 	}
 
 	@Test
+	public void handleRoundResolvedForGamePlayers_twoFreshVotes_carriesSpectatorsToFreshLobby() {
+		FreshRematchThreePlayerFixture fx = givenPlayingLobbyForFreshRematchScenario(14L, "PLAY-FRESH-SPEC", 1401L);
+		User spectator = new User();
+		spectator.setId(9L);
+		spectator.setStatus(UserStatus.SPECTATING);
+		fx.playingLobby().setSpectatorIds(new ArrayList<>(List.of(9L)));
+		Mockito.when(userRepository.findAllById(List.of(9L))).thenReturn(List.of(spectator));
+
+		lobbyService.handleRoundResolvedForGamePlayers(
+				List.of(1L, 2L, 3L),
+				List.of(),
+				List.of(1L, 2L)
+		);
+
+		ArgumentCaptor<Lobby> savedLobbyCaptor = ArgumentCaptor.forClass(Lobby.class);
+		Mockito.verify(lobbyRepository).save(savedLobbyCaptor.capture());
+		Lobby freshLobby = savedLobbyCaptor.getValue();
+		assertEquals("WAITING", freshLobby.getStatus());
+		assertEquals(List.of(1L, 2L), freshLobby.getPlayerIds());
+		assertEquals(List.of(9L), freshLobby.getSpectatorIds());
+		assertEquals(UserStatus.SPECTATING, spectator.getStatus());
+		assertEquals(UserStatus.LOBBY, fx.p1().getStatus());
+		assertEquals(UserStatus.LOBBY, fx.p2().getStatus());
+		assertEquals(UserStatus.ONLINE, fx.p3().getStatus());
+		Mockito.verify(lobbyRepository).delete(fx.playingLobby());
+	}
+
+	@Test
 	public void handleRoundResolvedForGamePlayers_twoFreshVotes_invalidFreshRematchRequesterId_fallsBackToHostBasedOnTurnOrder() {
 		givenPlayingLobbyForFreshRematchScenario(13L, "PLAY-FRESH-FALLBACK", 1301L);
 
@@ -700,14 +728,14 @@ public class LobbyServiceTest {
 	}
 
 	@Test
-	public void findPlayingSessionIdForPlayers_noExactMatchOrEmptyInput_returnsNull() {
+	public void findPlayingSessionIdForPlayers_noExactMatch_usesBestOverlapFallback_orEmptyInputReturnsNull() {
 		Lobby onlyLobby = new Lobby();
 		onlyLobby.setSessionId("PLAY123");
 		onlyLobby.setStatus("PLAYING");
 		onlyLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L, 3L)));
 		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of(onlyLobby));
 
-		assertNull(lobbyService.findPlayingSessionIdForPlayers(List.of(1L, 2L, 4L)));
+		assertEquals("PLAY123", lobbyService.findPlayingSessionIdForPlayers(List.of(1L, 2L, 4L)));
 		assertNull(lobbyService.findPlayingSessionIdForPlayers(List.of()));
 		assertNull(lobbyService.findPlayingSessionIdForPlayers(null));
 	}

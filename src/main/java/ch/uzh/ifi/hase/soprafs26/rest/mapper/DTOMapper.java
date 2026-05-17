@@ -53,6 +53,7 @@ public interface DTOMapper {
     @Mapping(source = "musicVolume", target = "musicVolume")
     @Mapping(source = "soundEffectsVolume", target = "soundEffectsVolume")
     @Mapping(source = "musicBlacklist", target = "musicBlacklist")
+    @Mapping(target = "joinableSessionId", ignore = true)
 	UserGetDTO convertEntityToUserGetDTO(User user);
 
     @BeanMapping(ignoreByDefault = true)

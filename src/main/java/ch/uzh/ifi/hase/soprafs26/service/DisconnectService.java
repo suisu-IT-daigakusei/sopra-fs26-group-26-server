@@ -51,6 +51,12 @@ public class DisconnectService {
         if (hasActiveWebSocketSession(userId)) {
             return;
         }
+        User userRecord = userRepository.findById(userId).orElse(null);
+        if (userRecord != null && userRecord.getStatus() == UserStatus.SPECTATING) {
+            // Spectators are fully exempt from websocket-grace timeout removal.
+            cancelDisconnectTimer(userId);
+            return;
+        }
         // Outside lobby/game context, websocket disconnect alone should not force offline.
         // Presence there is governed by heartbeat idle checks.
         if (lobbyService != null && !lobbyService.isUserInLobbyContext(userId)) {
@@ -92,6 +98,10 @@ public class DisconnectService {
 
         Instant now = Instant.now();
         for (User user : users) {
+            if (user != null && user.getStatus() == UserStatus.SPECTATING) {
+                // Spectators are fully exempt from idle-timeout removal.
+                continue;
+            }
             if (user.getLastHeartbeat() == null) {
                 continue;
             }
@@ -157,6 +167,9 @@ public class DisconnectService {
         );
 
         for (User user : usersToAutoLogout) {
+            if (user == null) {
+                continue;
+            }
             user.setStatus(UserStatus.OFFLINE);
             user.setToken(UUID.randomUUID().toString());
             userRepository.save(user);
@@ -223,6 +236,11 @@ public class DisconnectService {
     private void performPermanentRemoval(Long userId, String reason, long thresholdSeconds) {
         User user = userRepository.findById(userId).orElse(null);
         if (user == null) return;
+        if (user.getStatus() == UserStatus.SPECTATING) {
+            // Spectators are fully exempt from timeout-driven disconnect removal.
+            activeTimers.remove(userId);
+            return;
+        }
         if (lobbyService != null && lobbyService.isPlayerTimedOutInPlaying(userId)) {
             // Idempotency guard for midgame timeout path.
             return;

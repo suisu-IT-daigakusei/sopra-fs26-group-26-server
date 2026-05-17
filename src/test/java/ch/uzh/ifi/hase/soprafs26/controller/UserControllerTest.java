@@ -14,6 +14,7 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendRequestIncomingDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPostDTO;
 import ch.uzh.ifi.hase.soprafs26.service.GameService;
 import ch.uzh.ifi.hase.soprafs26.service.HistoryService;
+import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
 import ch.uzh.ifi.hase.soprafs26.service.UserService;
 import ch.uzh.ifi.hase.soprafs26.util.AuthValidationRules;
 
@@ -62,6 +63,9 @@ public class UserControllerTest {
 
 	@MockitoBean
 	private HistoryService historyService;
+
+	@MockitoBean
+	private LobbyService lobbyService;
 
 	@MockitoBean
 	private UserRepository userRepository;

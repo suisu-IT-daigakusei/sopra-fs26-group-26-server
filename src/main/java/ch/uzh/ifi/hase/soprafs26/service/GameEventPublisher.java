@@ -3,10 +3,13 @@ package ch.uzh.ifi.hase.soprafs26.service;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.GameStateBroadcastDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapper;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 @Service
 public class GameEventPublisher {
@@ -18,11 +21,14 @@ public class GameEventPublisher {
     private final SimpMessagingTemplate messagingTemplate;
     // has the logic for filtering
     private final GameStateBroadcastMapper gameStateBroadcastMapper;
+    private final LobbyService lobbyService;
 
     public GameEventPublisher(SimpMessagingTemplate messagingTemplate,
-                              GameStateBroadcastMapper gameStateBroadcastMapper) {
+                              GameStateBroadcastMapper gameStateBroadcastMapper,
+                              @Lazy LobbyService lobbyService) {
         this.messagingTemplate = messagingTemplate;
         this.gameStateBroadcastMapper = gameStateBroadcastMapper;
+        this.lobbyService = lobbyService;
     }
 
     public void publishFilteredState(Game game) {
@@ -34,11 +40,17 @@ public class GameEventPublisher {
         if (playerIds == null || playerIds.isEmpty()) {
             return;
         }
-        // for each player
-        for (Long userId : playerIds) {
-            // build the player's filtered representation of the game state
+        Set<Long> recipientIds = new LinkedHashSet<>();
+        recipientIds.addAll(playerIds);
+        if (lobbyService != null) {
+            recipientIds.addAll(lobbyService.findPlayingSpectatorIdsForPlayers(playerIds));
+        }
+
+        for (Long userId : recipientIds) {
+            if (userId == null) {
+                continue;
+            }
             GameStateBroadcastDTO dto = gameStateBroadcastMapper.toBroadcastForViewer(game, userId);
-            // send it to that player
             messagingTemplate.convertAndSendToUser(String.valueOf(userId), USER_QUEUE_GAME_STATE, dto);
         }
     }

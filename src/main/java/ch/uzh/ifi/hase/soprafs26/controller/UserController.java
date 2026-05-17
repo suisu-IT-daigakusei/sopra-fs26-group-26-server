@@ -1,11 +1,9 @@
 package ch.uzh.ifi.hase.soprafs26.controller;
 
-import org.springframework.http.HttpStatus;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.server.ResponseStatusException;
-
+import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.Session;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
+import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.AuthRulesDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendOnlineSummaryDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendRequestIncomingDTO;
@@ -15,102 +13,136 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.UserLoginDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPostDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPutDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.mapper.DTOMapper;
-import ch.uzh.ifi.hase.soprafs26.service.UserService;
 import ch.uzh.ifi.hase.soprafs26.service.HistoryService;
-import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
+import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
+import ch.uzh.ifi.hase.soprafs26.service.UserService;
 import ch.uzh.ifi.hase.soprafs26.util.AuthValidationRules;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.ResponseBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.nio.charset.StandardCharsets;
-import java.net.URLDecoder;
+import java.util.Map;
 
-/**
- * User Controller
- * This class is responsible for handling all REST request that are related to
- * the user.
- * The controller will receive the request and delegate the execution to the
- * UserService and finally return the result.
- */
-
-// basically schnittstelle zwischen front und backend,
-// empfängt alle http requests vom frontend
-@RestController // sagt Spring dass diese Klasse REST Endpoints hat
+@RestController
 public class UserController {
 
-	private final UserService userService; // zugriff auf den userService für Logik
+    private final UserService userService;
     private final HistoryService historyService;
+    private final LobbyService lobbyService;
     private final UserRepository userRepository;
 
-	UserController(UserService userService, HistoryService historyService, UserRepository userRepository) {
-		this.userService = userService;
+    public UserController(
+            UserService userService,
+            HistoryService historyService,
+            LobbyService lobbyService,
+            UserRepository userRepository) {
+        this.userService = userService;
         this.historyService = historyService;
+        this.lobbyService = lobbyService;
         this.userRepository = userRepository;
-	} // UserService wird automatisch von Spring injiziert
+    }
 
-    // GET /users - alle User laden (zb auf Userliste) von frontend aufgerufen
-	@GetMapping("/users")
-	@ResponseStatus(HttpStatus.OK)
-	@ResponseBody
-	public List<UserGetDTO> getAllUsers() { // holt alle user aus der datenbank via service
-		// fetch all users in the internal representation
-		List<User> users = userService.getUsers(); // users ist nun liste mit allen usern aufgelistet
-		List<UserGetDTO> userGetDTOs = new ArrayList<>(); // erstellen neuer leerer liste für die dtos (version der user die ans frontend geschickt werden ohne passwort)
+    private UserStatus normalizeVisibleStatus(UserStatus persistedStatus, UserStatus lobbyPresenceStatus) {
+        if (lobbyPresenceStatus != null) {
+            return lobbyPresenceStatus;
+        }
+        if (persistedStatus == UserStatus.LOBBY
+                || persistedStatus == UserStatus.PLAYING
+                || persistedStatus == UserStatus.SPECTATING) {
+            return UserStatus.ONLINE;
+        }
+        return persistedStatus;
+    }
 
-		// convert each user to the API representation
-		for (User user : users) { // geht durch alle user und wandelt in dto um und addet sie zur liste
-			UserGetDTO dto = DTOMapper.INSTANCE.convertEntityToUserGetDTO(user);
-			dto.setToken(null);
-			userGetDTOs.add(dto); // siehe dto skripte im rest ordner
-		}
-		return userGetDTOs; // fertige liste wird dann ans frontend gesendet
-	}
-// POST /users - frontend ruft das auf wenn ein neuer User sich registriert
-	@PostMapping("/users")
-	@ResponseStatus(HttpStatus.CREATED)
-	@ResponseBody
-    // @Valid is used to trigger validation of the UserPostDTO based on the annotations in that class (e.g., @Size for username)
-	public UserGetDTO createUser(@Valid @RequestBody UserPostDTO userPostDTO) {
-		// convert API user to internal representation
-        // @RequestBody holt die userdaten (username, password, bio) aus dem request body des frontends
-		User userInput = DTOMapper.INSTANCE.convertUserPostDTOtoEntity(userPostDTO); // DTO zu Entity umwandeln
+    @GetMapping("/users")
+    @ResponseStatus(HttpStatus.OK)
+    @ResponseBody
+    public List<UserGetDTO> getAllUsers() {
+        List<User> users = userService.getUsers();
+        List<UserGetDTO> userGetDTOs = new ArrayList<>();
 
-		// create user
-		User createdUser = userService.createUser(userInput); // user in datenbank speichern via service
-		// convert internal representation of user back to API
-		return DTOMapper.INSTANCE.convertEntityToUserGetDTO(createdUser); // fertigen user ans frontend schicken
-	}
-    // GET/users - für das Abrufen eines einzelnen Profils des frontends
+        List<Long> userIds = users.stream()
+                .map(User::getId)
+                .filter(id -> id != null)
+                .toList();
+        Map<Long, String> joinableSessionIdByUserId = lobbyService.resolveJoinableSessionIdsForUsers(userIds);
+        if (joinableSessionIdByUserId == null) {
+            joinableSessionIdByUserId = Map.of();
+        }
+        Map<Long, UserStatus> lobbyPresenceStatusByUserId = lobbyService.resolveLobbyPresenceStatusForUsers(userIds);
+        if (lobbyPresenceStatusByUserId == null) {
+            lobbyPresenceStatusByUserId = Map.of();
+        }
+
+        for (User user : users) {
+            UserGetDTO dto = DTOMapper.INSTANCE.convertEntityToUserGetDTO(user);
+            dto.setToken(null);
+            if (user.getId() != null) {
+                dto.setJoinableSessionId(joinableSessionIdByUserId.get(user.getId()));
+            } else {
+                dto.setJoinableSessionId(null);
+            }
+            UserStatus lobbyPresenceStatus = user.getId() == null ? null : lobbyPresenceStatusByUserId.get(user.getId());
+            dto.setStatus(normalizeVisibleStatus(user.getStatus(), lobbyPresenceStatus));
+            userGetDTOs.add(dto);
+        }
+        return userGetDTOs;
+    }
+
+    @PostMapping("/users")
+    @ResponseStatus(HttpStatus.CREATED)
+    @ResponseBody
+    public UserGetDTO createUser(@Valid @RequestBody UserPostDTO userPostDTO) {
+        User userInput = DTOMapper.INSTANCE.convertUserPostDTOtoEntity(userPostDTO);
+        User createdUser = userService.createUser(userInput);
+        return DTOMapper.INSTANCE.convertEntityToUserGetDTO(createdUser);
+    }
+
     @GetMapping("/users/{userId}")
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
-    public UserGetDTO getUserById(@PathVariable Long userId) {User user = userService.getUserById(userId);
-        // @PathVariable holt die userid aus url und return schikt user ans Fromtend
-    UserGetDTO dto = DTOMapper.INSTANCE.convertEntityToUserGetDTO(user);
-    dto.setToken(null);
-    return dto;
+    public UserGetDTO getUserById(@PathVariable Long userId) {
+        User user = userService.getUserById(userId);
+        UserGetDTO dto = DTOMapper.INSTANCE.convertEntityToUserGetDTO(user);
+        dto.setToken(null);
+        UserStatus lobbyPresenceStatus = null;
+        if (user.getId() != null) {
+            dto.setJoinableSessionId(lobbyService.resolveJoinableSessionIdForUser(user.getId()));
+            lobbyPresenceStatus = lobbyService.resolveLobbyPresenceStatusForUser(user.getId());
+        } else {
+            dto.setJoinableSessionId(null);
+        }
+        dto.setStatus(normalizeVisibleStatus(user.getStatus(), lobbyPresenceStatus));
+        return dto;
     }
 
-    // PUT /users/{userId}- für Ändern des Passworts
     @PutMapping("/users/{userId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    // user id aus der URL wird als Variable geholt und die Daten im Body des Requests ebenfalls
     public void updateUser(@PathVariable Long userId, @Valid @RequestBody UserPutDTO userPutDTO) {
         User userInput = DTOMapper.INSTANCE.convertUserPutDTOtoEntity(userPutDTO);
         userService.updateUser(userId, userInput);
     }
-        // @PathVariable holt userId aus URL, @RequestBody holt neues passwort aus request body
 
-
-    // POST /login - wenn user sich einloggen will
     @PostMapping("/login")
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
     public UserGetDTO loginUser(@Valid @RequestBody UserLoginDTO userPostDTO) {
-        // @RequestBody holt username und passwort aus dem request body
-        User user = userService.loginUser(userPostDTO.getUsername(), userPostDTO.getPassword()); // credentials werden geprüft
-        return DTOMapper.INSTANCE.convertEntityToUserGetDTO(user); // eingeloggten user ans frontend senden
+        User user = userService.loginUser(userPostDTO.getUsername(), userPostDTO.getPassword());
+        return DTOMapper.INSTANCE.convertEntityToUserGetDTO(user);
     }
 
     @GetMapping("/auth/rules")
@@ -141,35 +173,38 @@ public class UserController {
         return rules;
     }
 
-	// endpoint according to REST interface table
     @PostMapping("/auth/logout")
     @ResponseStatus(HttpStatus.OK)
-    // needs to be authenticated so we request token
     public void logoutUser(@RequestHeader("Authorization") String token) {
         userService.logoutUser(token);
     }
 
-    // beacon logout — called when tab closes
     @PostMapping("/auth/logout/beacon")
     @ResponseStatus(HttpStatus.OK)
     public void logoutUserBeacon(@RequestBody(required = false) String body) {
-        if (body == null || body.isBlank()) return;
+        if (body == null || body.isBlank()) {
+            return;
+        }
+
         String cleaned = body.trim();
         String token;
         if (cleaned.startsWith("{")) {
-            token = cleaned.replace("{", "").replace("}", "")
-                    .replace("\"token\":", "").replace("\"", "").trim();
+            token = cleaned.replace("{", "")
+                    .replace("}", "")
+                    .replace("\"token\":", "")
+                    .replace("\"", "")
+                    .trim();
         } else if (cleaned.startsWith("token=")) {
             token = URLDecoder.decode(cleaned.substring("token=".length()), StandardCharsets.UTF_8);
         } else {
             token = cleaned;
         }
+
         if (!token.isBlank()) {
-            userService.logoutUser(token); // use existing userService method
+            userService.logoutUser(token);
         }
     }
 
-    // heartbeat — frontend activity tracking (active/focused tab + user input)
     @PostMapping("/heartbeat")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void handleHeartbeat(@RequestHeader("Authorization") String token) {
@@ -238,15 +273,12 @@ public class UserController {
 
     @GetMapping("/users/{id}/history")
     public List<SessionHistoryDTO> getUserHistory(@PathVariable Long id, @RequestHeader("Authorization") String token) {
-        
         User user = userRepository.findByToken(token);
         if (user == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token!");
         }
 
         List<Session> sessionHistory = historyService.getUserSessionHistory(id);
-        List<SessionHistoryDTO> sessionHistoryDTOs = DTOMapper.INSTANCE.convertEntityListToSessionHistoryDTOList(sessionHistory);
-        return sessionHistoryDTOs;
+        return DTOMapper.INSTANCE.convertEntityListToSessionHistoryDTOList(sessionHistory);
     }
-
 }

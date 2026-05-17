@@ -30,8 +30,8 @@ public class SessionController {
     public SessionHistoryDTO getSessionHistory(
             @PathVariable String sessionId,
             @RequestHeader("Authorization") String token) {
-        User requester = userRepository.findByToken(token);
-        if (requester == null) {
+        User authenticatedUser = userRepository.findByToken(token);
+        if (authenticatedUser == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
         }
 
@@ -40,11 +40,6 @@ public class SessionController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found");
         }
 
-        if (session.getTotalScoreByUserId() == null || !session.getTotalScoreByUserId().containsKey(requester.getId())) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not a participant of this session");
-        }
-
         return DTOMapper.INSTANCE.convertEntityToSessionHistoryDTO(session);
     }
 }
-

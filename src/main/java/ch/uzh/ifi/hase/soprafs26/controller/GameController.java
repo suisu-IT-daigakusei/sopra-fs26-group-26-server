@@ -5,6 +5,7 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.PeekSelectionDTO;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.http.HttpStatus;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -77,7 +78,14 @@ public class GameController {
     public Map<String, String> getActiveGameForCurrentUser(
             @RequestHeader("Authorization") String token) {
         return gameService.getActiveGameForToken(token)
-                .map(game -> Map.of("gameId", game.getId()))
+                .map(game -> {
+                    Map<String, String> payload = new HashMap<>();
+                    payload.put("gameId", game.getId());
+                    if (game.getStatus() != null) {
+                        payload.put("status", game.getStatus().name());
+                    }
+                    return payload;
+                })
                 .orElseGet(Map::of);
     }
 
