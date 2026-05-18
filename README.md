@@ -1,118 +1,129 @@
-# SoPra RESTful Service Template FS26
+# Online-CABO — Backend
 
-## Getting started with Spring Boot
--   Documentation: https://docs.spring.io/spring-boot/docs/current/reference/html/index.html
--   Guides: http://spring.io/guides
-    -   Building a RESTful Web Service: http://spring.io/guides/gs/rest-service/
-    -   Building REST services with Spring: https://spring.io/guides/tutorials/rest/
+REST API and real-time server for **Online-CABO**, a web-based multiplayer card game inspired by Cabo. This repository is the Spring Boot backend for the SoPra FS26 project at the University of Zurich. The [frontend](https://github.com/liun777/sopra-fs26-group-26-client) runs at `http://localhost:3000` and talks to this service at **`http://localhost:8080`**.
 
-## Setup this Template with your IDE of choice
-Download your IDE of choice (e.g., [IntelliJ](https://www.jetbrains.com/idea/download/), [Visual Studio Code](https://code.visualstudio.com/), or [Eclipse](http://www.eclipse.org/downloads/)). Make sure Java 17 is installed on your system (for Windows, please make sure your `JAVA_HOME` environment variable is set to the correct version of Java).
+## Introduction
 
-### IntelliJ
-If you consider to use IntelliJ as your IDE of choice, you can make use of your free educational license [here](https://www.jetbrains.com/community/education/#students).
-1. File -> Open... -> SoPra server template
-2. Accept to import the project as a `gradle project`
-3. To build right click the `build.gradle` file and choose `Run Build`
+**Goal:** Provide a secure, stateful multiplayer backend for Cabo-style rounds—lobbies, live game state, moves, scoring, rematch, friends, and session history—so the web client can stay thin and event-driven.
 
-### VS Code
-The following extensions can help you get started more easily:
--   `vmware.vscode-spring-boot`
--   `vscjava.vscode-spring-initializr`
--   `vscjava.vscode-spring-boot-dashboard`
--   `vscjava.vscode-java-pack`
+**Motivation:** Cabo relies on hidden information, timed phases, and synchronized updates between players. A dedicated server enforces rules, persists session data, and broadcasts changes over WebSockets to clients.
 
-**Note:** You'll need to build the project first with Gradle, just click on the `build` command in the _Gradle Tasks_ extension. Then check the _Spring Boot Dashboard_ extension if it already shows `soprafs26` and hit the play button to start the server. If it doesn't show up, restart VS Code and check again.
+## Technologies used
 
-## Building with Gradle
-You can use the local Gradle Wrapper to build the application.
--   macOS: `./gradlew`
--   Linux: `./gradlew`
--   Windows: `./gradlew.bat`
+- **Application stack** — Java 17, Spring Boot, Spring Data JPA
+- **Real-time communication** — Spring WebSocket (STOMP)
+- **Build & quality** — Gradle, JUnit, JaCoCo, SonarCloud
+- **Database** — H2 (in-memory, local development)
+- **Object mapping** — MapStruct (entity ↔ DTO)
+- **Hosting** — Google App Engine (production deployment)
 
-More Information about [Gradle Wrapper](https://docs.gradle.org/current/userguide/gradle_wrapper.html) and [Gradle](https://gradle.org/docs/).
+## High-level components
 
-### Build
+Five main parts work together: HTTP API → services → persistence, with WebSockets parallel to REST for push updates.
+
+| Component | Role | Main entry points |
+|-----------|------|-------------------|
+| **Application shell** | Starts the server, CORS, scheduler thread pool, health check on `/` | [`Application.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/Application.java) |
+| **REST controllers** | Expose HTTP endpoints (users, lobbies, games, moves, sessions, invites) | [`UserController.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/controller/UserController.java), [`LobbyController.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/controller/LobbyController.java), [`GameController.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/controller/GameController.java) |
+| **Services** | Game rules, lobby lifecycle, authentication, scoring, timers | [`GameService.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/service/GameService.java), [`LobbyService.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/service/LobbyService.java), [`UserService.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/service/UserService.java) |
+| **WebSockets** | Push lobby/game/rematch state to connected clients | [`WebSocketConfig.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/config/WebSocketConfig.java), [`LobbyWebSocketController.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/controller/LobbyWebSocketController.java) |
+| **Persistence** | JPA entities and repositories (users, lobbies, games, sessions, moves) | [`Game.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/entity/Game.java), [`Lobby.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/entity/Lobby.java), [`GameRepository.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/repository/GameRepository.java) |
+
+Controllers call services; services read/write entities via repositories and publish events to WebSocket topics. Shared settings (timers, CORS, player limits) live in [`application.properties`](src/main/resources/application.properties) (local) and [`application-gcp.properties`](src/main/resources/application-gcp.properties) (GCP).
+
+## Launch & Deployment
+
+### Prerequisites
+
+- Java 17 (JDK)
+- Git  
+Optional: VS Code/IntelliJ, [Postman](https://www.postman.com/) for manual API calls.
+
+### Getting started (new developer)
+
+```bash
+git clone https://github.com/liun777/sopra-fs26-group-26-server.git
+cd sopra-fs26-group-26-server
+```
+
+### Build and run locally
 
 ```bash
 ./gradlew build
-```
-
-### Run
-
-```bash
 ./gradlew bootRun
 ```
 
-You can verify that the server is running by visiting `localhost:8080` in your browser.
+Open [http://localhost:8080](http://localhost:8080) — expected response: `The application is running.`
 
-### Test
+**Development mode** (auto-rebuild without running tests): in one terminal `./gradlew build --continuous -x test`, in another `./gradlew bootRun`.
+
+### Run tests
 
 ```bash
 ./gradlew test
 ```
 
-### Development Mode
-You can start the backend in development mode, this will automatically trigger a new build and reload the application
-once the content of a file has been changed.
+**Coverage report:**
 
-Start two terminal windows and run:
+```bash
+./gradlew test jacocoTestReport
+```
 
-`./gradlew build --continuous`
+Open `build/reports/jacoco/test/html/index.html` in a browser.
 
-and in the other one:
 
-`./gradlew bootRun`
+### External dependencies and database
 
-If you want to avoid running all tests with every change, use the following command instead:
+| Dependency | Purpose |
+|------------|---------|
+| **[Frontend](https://github.com/liun777/sopra-fs26-group-26-client)** | Required for end-to-end play; must be running separately for full-stack local dev |
+| **H2** | In-memory database (local); no install needed. Console: [http://localhost:8080/h2-console](http://localhost:8080/h2-console) — JDBC `jdbc:h2:mem:testdb`, user `sa`, empty password |
+| **Deck of Cards API** | External deck via [`DeckOfCardsAPIService.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/service/DeckOfCardsAPIService.java); if unavailable, [`GameService.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/service/GameService.java) builds a local fallback deck |
 
-`./gradlew build --continuous -xtest`
+CORS allows `http://localhost:3000` and the deployed Vercel client URL (see [`application.properties`](src/main/resources/application.properties)).
 
-## API Endpoint Testing with Postman
-We recommend using [Postman](https://www.getpostman.com) to test your API Endpoints.
+### Releases / production deployment
 
-## Debugging
-If something is not working and/or you don't know what is going on. We recommend using a debugger and step-through the process step-by-step.
+- **Google App Engine** (flex, Java 17): [`app.yaml`](app.yaml) sets `SPRING_PROFILES_ACTIVE=gcp`.
+- Pushes to **main** typically run CI (build, tests, deploy) via GitHub Actions.
+- **Docker** (optional, CI only): In the repo’s **Settings → Secrets**, maintain `dockerhub_username`, `dockerhub_password`, and `dockerhub_repo_name`. On push/PR, [`.github/workflows/dockerize.yml`](.github/workflows/dockerize.yml) builds [`Dockerfile`](Dockerfile) and pushes the image `username/repo_name:latest` to Docker Hub.
 
-To configure a debugger for SpringBoot's Tomcat servlet (i.e. the process you start with `./gradlew bootRun` command), do the following:
+- **Manual JAR:**
 
-1. Open Tab: **Run**/Edit Configurations
-2. Add a new Remote Configuration and name it properly
-3. Start the Server in Debug mode: `./gradlew bootRun --debug-jvm`
-4. Press `Shift + F9` or the use **Run**/Debug "Name of your task"
-5. Set breakpoints in the application where you need it
-6. Step through the process one step at a time
+```bash
+./gradlew bootJar
+java -jar build/libs/soprafs26.jar
+```
 
-## Testing
-Have a look here: https://www.baeldung.com/spring-boot-testing
+### API overview
 
-<br>
-<br>
-<br>
+REST examples: `/users`, `/lobbies`, `/games`, `/sessions`, `/auth/rules`. Auth uses a token header (see [`UserService.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/service/UserService.java)). WebSocket STOMP setup: [`WebSocketConfig.java`](src/main/java/ch/uzh/ifi/hase/soprafs26/config/WebSocketConfig.java).
 
-## Docker
+## Roadmap
 
-### Introduction
-This year Docker will be used to ease the process of deployment.\
-Docker is a tool that uses containers as isolated environments, ensuring that the application runs consistently and uniformly across different devices.\
-Everything in this repository is already set up to minimize your effort for deployment.\
-All changes to the main branch will automatically be pushed to dockerhub and optimized for production.
+Top ideas for new contributors:
 
-### Setup
-1. **One** member of the team should create an account on [dockerhub](https://hub.docker.com/), _incorporating the group number into the account name_, for example, `SoPra_group_XX`.\
-2. This account then creates a repository on dockerhub with the _same name as the group's Github repository name_.\
-3. Finally, the person's account details need to be added as [secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#creating-secrets-for-a-repository) to the group's repository:
-    - dockerhub_username (the username of the dockerhub account from step 1, for example, `SoPra_group_XX`)
-    - dockerhub_password (a generated PAT([personal access token](https://docs.docker.com/docker-hub/access-tokens/)) of the account with read and write access)
-    - dockerhub_repo_name (the name of the dockerhub repository from step 2)
+1. **Persistent production database** (e.g. Cloud SQL) with schema migrations instead of only in-memory H2 locally.
+2. **OpenAPI / Swagger** documentation generated from controllers.
 
-### Pull and run
-Once the image is created and has been successfully pushed to dockerhub, the image can be run on any machine.\
-Ensure that [Docker](https://www.docker.com/) is installed on the machine you wish to run the container.\
-First, pull (download) the image with the following command, replacing your username and repository name accordingly.
+## Authors and acknowledgment
 
-```docker pull <dockerhub_username>/<dockerhub_repo_name>```
+**Authors**
 
-Then, run the image in a container with the following command, again replacing _<dockerhub_username>_ and _<dockerhub_repo_name>_ accordingly.
+* **Alexandra Gort** — Frontend — [@aleexgort](https://github.com/aleexgort)
+* **Liun Grichting** — Backend — [@liun777](https://github.com/liun777)
+* **Jana Graf** — Backend — [@janagraf](https://github.com/janagraf)
+* **Jan Alexander Studenski** — Frontend — [@suisu-IT-daigakusei](https://github.com/suisu-IT-daigakusei)
+* **Uliana Solohub** — Backend — [@uIiana](https://github.com/uIiana)
 
-```docker run -p 3000:3000 <dockerhub_username>/<dockerhub_repo_name>```
+See also: [contributors](https://github.com/liun777/sopra-fs26-group-26-server/graphs/contributors)
+
+**Acknowledgment**
+
+* Thomas Fritz, Prof. Dr., and the SoPra FS26 teaching assistants at the University of Zurich
+* The original Cabo card game for design inspiration
+* Contributors to the open-source libraries used in this project
+
+## License
+
+This project is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
