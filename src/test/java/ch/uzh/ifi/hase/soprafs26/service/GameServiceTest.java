@@ -34,6 +34,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Collection;
+import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -51,7 +53,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
+import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.Mockito.atLeastOnce;
 
 public class GameServiceTest {
 
@@ -2865,6 +2868,117 @@ public class GameServiceTest {
         assertTrue(game.getDrawPile().isEmpty(), "Card should be removed from draw pile");
         assertEquals("8S", game.getDrawnCard().getCode(), "Drawn card should be set");
         Mockito.verify(gameRepository, Mockito.times(1)).save(game);
+    }
+
+    /**
+     * Erstellt die User-Objekte separat für den Test
+     */
+    private Map<Long, User> setupConcreteUsersAndSession(List<Long> userIds, List<String> usernames) {
+        Map<Long, User> userMap = new HashMap<>();
+        
+        for (int i = 0; i < userIds.size(); i++) {
+            Long id = userIds.get(i);
+            User user = new User();
+            user.setId(id);
+            user.setUsername(usernames.get(i));
+            user.setGamesPlayed(0);
+            user.setGamesWon(0);
+            user.setGamesLost(0);
+            user.setTotalPointsAccumulated(0);
+            userMap.put(id, user);
+        }
+
+        // Mocking verweist nun lokal auf die eben erstellten User
+        Mockito.when(userRepository.findAllById(anyCollection())).thenAnswer(invocation -> {
+            Collection<Long> requestedIds = invocation.getArgument(0);
+            List<User> foundUsers = new ArrayList<>();
+            for (Long id : requestedIds) {
+                if (userMap.containsKey(id)) {
+                    foundUsers.add(userMap.get(id));
+                }
+            }
+            return foundUsers;
+        });
+
+        // Session separat für diesen Testlauf vorbereiten
+        Session session = new Session();
+        session.setId(1L);
+        session.setSessionId("test-session");
+        session.setEnded(false);
+        session.setAbsentRoundPoints(20L);
+        session.setTotalScoreByUserId(new HashMap<>());
+        session.setUserScoresPerRound(new ArrayList<>());
+
+        Mockito.when(sessionRepository.findBySessionId("test-session")).thenReturn(session);
+        Mockito.when(sessionRepository.save(any(Session.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        Mockito.when(userRepository.saveAll(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+        Mockito.when(lobbyService.findPlayingSessionIdForPlayers(anyList())).thenReturn("test-session");
+
+        return userMap;
+    }
+
+    private Game createGameWithScores(Map<Long, Integer> playerScores) {
+        Game game = new Game();
+        game.setId("test-game-" + UUID.randomUUID());
+        game.setOrderedPlayerIds(new ArrayList<>(playerScores.keySet()));
+        
+        Map<Long, List<Card>> playerHands = new HashMap<>();
+        for (Map.Entry<Long, Integer> entry : playerScores.entrySet()) {
+            playerHands.put(entry.getKey(), createHandWithTotalValue(entry.getValue()));
+        }
+        game.setPlayerHands(playerHands);
+
+        Mockito.when(gameRepository.findById(game.getId())).thenReturn(Optional.of(game));
+        
+        return game;
+    }
+
+    private List<Card> createHandWithTotalValue(int totalValue) {
+        List<Card> hand = new ArrayList<>();
+        int baseValue = totalValue / 4;
+        int remainder = totalValue % 4;
+        
+        for (int i = 0; i < 4; i++) {
+            Card card = new Card();
+            int value = baseValue + (i < remainder ? 1 : 0);
+            card.setValue(value);
+            card.setCode(value + "H");
+            hand.add(card);
+        }
+        return hand;
+    }
+
+    @Test
+    void testTwoPlayersWithSameLowestScore_BothShouldWin() {
+        // Given: User-Setup wird hier komplett isoliert und separat durchgeführt
+        Map<Long, User> testUsers = setupConcreteUsersAndSession(
+            List.of(1L, 2L, 3L, 4L), 
+            List.of("Alice", "Bob", "Carol", "Dave")
+        );
+
+        Game game = createGameWithScores(Map.of(1L, 15, 2L, 15, 3L, 23, 4L, 30));
+        Map<Long, Integer> roundScores = Map.of(1L, 15, 2L, 15, 3L, 23, 4L, 30);
+
+        // When
+        gameService.saveRoundScoreAndCheckGameOver(game.getId(), roundScores);
+
+        // Then
+        ArgumentCaptor<Session> sessionCaptor = ArgumentCaptor.forClass(Session.class);
+        verify(sessionRepository, atLeastOnce()).save(sessionCaptor.capture());
+        Session savedSession = sessionCaptor.getValue();
+
+        List<Long> winners = savedSession.getWinnerIds();
+        assertEquals(2, winners.size());
+        assertTrue(winners.contains(1L));
+        assertTrue(winners.contains(2L));
+
+        ArgumentCaptor<List<User>> usersCaptor = ArgumentCaptor.forClass(List.class);
+        verify(userRepository, atLeastOnce()).saveAll(usersCaptor.capture());
+        List<User> savedUsers = usersCaptor.getValue();
+
+        User savedAlice = savedUsers.stream().filter(u -> u.getId().equals(1L)).findFirst().orElse(null);
+        assertNotNull(savedAlice);
+        assertEquals(1, savedAlice.getGamesWon());
     }
 }
 
