@@ -2725,6 +2725,58 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
+    void getCurrentTurnOwnerForToken_participant_returnsCurrentTurnUserId() {
+        User user = new User();
+        user.setId(1L);
+        Mockito.when(userRepository.findByToken("valid-token")).thenReturn(user);
+
+        Game game = new Game();
+        game.setId("game-123");
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setCurrentPlayerId(2L);
+        Mockito.when(gameRepository.findById("game-123")).thenReturn(Optional.of(game));
+
+        Long result = gameService.getCurrentTurnOwnerForToken("game-123", "valid-token");
+        assertEquals(2L, result);
+    }
+
+    @Test
+    void getCurrentTurnOwnerForToken_spectator_returnsCurrentTurnUserId() {
+        User user = new User();
+        user.setId(99L);
+        Mockito.when(userRepository.findByToken("spectator-token")).thenReturn(user);
+
+        Game game = new Game();
+        game.setId("game-123");
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setCurrentPlayerId(1L);
+        Mockito.when(gameRepository.findById("game-123")).thenReturn(Optional.of(game));
+        Mockito.when(lobbyService.findPlayingSpectatorIdsForPlayers(List.of(1L, 2L))).thenReturn(List.of(99L));
+
+        Long result = gameService.getCurrentTurnOwnerForToken("game-123", "spectator-token");
+        assertEquals(1L, result);
+    }
+
+    @Test
+    void getCurrentTurnOwnerForToken_notParticipantNorSpectator_throwsForbidden() {
+        User user = new User();
+        user.setId(77L);
+        Mockito.when(userRepository.findByToken("valid-token")).thenReturn(user);
+
+        Game game = new Game();
+        game.setId("game-123");
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setCurrentPlayerId(1L);
+        Mockito.when(gameRepository.findById("game-123")).thenReturn(Optional.of(game));
+        Mockito.when(lobbyService.findPlayingSpectatorIdsForPlayers(List.of(1L, 2L))).thenReturn(List.of(99L));
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class, () ->
+                gameService.getCurrentTurnOwnerForToken("game-123", "valid-token"));
+        assertEquals(HttpStatus.FORBIDDEN, exception.getStatusCode());
+        assertEquals("Not allowed to view this game", exception.getReason());
+    }
+
+    @Test
     void getMyHand_nullToken_throwsUnauthorized() {
         ResponseStatusException exception = assertThrows(ResponseStatusException.class, () -> {
             gameService.getMyHand("game-123", null);

@@ -453,6 +453,32 @@ public class GameService {
         return userId.equals(game.getCurrentPlayerId());
     }
 
+    public Long getCurrentTurnOwnerForToken(String gameId, String token) {
+        if (token == null || token.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
+        }
+        User user = userRepository.findByToken(token);
+        if (user == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
+        }
+
+        Game game = getGameById(gameId);
+        List<Long> orderedPlayers = game.getOrderedPlayerIds() == null
+                ? List.of()
+                : game.getOrderedPlayerIds();
+        boolean participant = orderedPlayers.contains(user.getId());
+        boolean spectator = false;
+        if (!participant && lobbyService != null) {
+            List<Long> spectatorIds = lobbyService.findPlayingSpectatorIdsForPlayers(orderedPlayers);
+            spectator = spectatorIds != null && spectatorIds.contains(user.getId());
+        }
+        if (!participant && !spectator) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed to view this game");
+        }
+
+        return game.getCurrentPlayerId();
+    }
+
     // get the player's own hand
     public List<Card> getMyHand(String gameId, String token) {
         if (token == null || token.isBlank()) {

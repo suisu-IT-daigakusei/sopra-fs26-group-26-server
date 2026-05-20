@@ -276,6 +276,38 @@ public class GameControllerTest {
     }
 
     @Test
+    void getTurnOwner_validRequest_returnsCurrentTurnUserId() throws Exception {
+        Mockito.when(gameService.getCurrentTurnOwnerForToken("game-123", "valid-token"))
+                .thenReturn(2L);
+
+        mockMvc.perform(get("/games/game-123/turn-owner")
+                .header("Authorization", "valid-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.currentTurnUserId", is(2)));
+    }
+
+    @Test
+    void getTurnOwner_nullCurrentTurn_returnsEmptyMap() throws Exception {
+        Mockito.when(gameService.getCurrentTurnOwnerForToken("game-123", "valid-token"))
+                .thenReturn(null);
+
+        mockMvc.perform(get("/games/game-123/turn-owner")
+                .header("Authorization", "valid-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()", is(0)));
+    }
+
+    @Test
+    void getTurnOwner_invalidToken_returnsUnauthorized() throws Exception {
+        Mockito.when(gameService.getCurrentTurnOwnerForToken("game-123", "bad-token"))
+                .thenThrow(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token"));
+
+        mockMvc.perform(get("/games/game-123/turn-owner")
+                .header("Authorization", "bad-token"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
     void moveAbilitySwap_validRequest_returnsOk() throws Exception {
         // 1. Setup: A perfect JSON body
         String validJsonBody = """

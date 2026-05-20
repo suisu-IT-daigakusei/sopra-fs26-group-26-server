@@ -19,6 +19,7 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -34,6 +35,13 @@ public class GameStateBroadcastMapper {
     }
 
     public GameStateBroadcastDTO toBroadcastForViewer(Game game, Long viewerUserId) {
+        return toBroadcastForViewer(game, viewerUserId, buildSharedContext(game));
+    }
+
+    public GameStateBroadcastDTO toBroadcastForViewer(
+            Game game,
+            Long viewerUserId,
+            SharedBroadcastContext sharedContext) {
         GameStateBroadcastDTO dto = new GameStateBroadcastDTO();
 
         dto.setGameId(game.getId());
@@ -91,30 +99,11 @@ public class GameStateBroadcastMapper {
         if (ordered == null) {
             ordered = List.of();
         }
-        if (lobbyService != null) {
-            dto.setSessionId(lobbyService.findPlayingSessionIdForPlayers(ordered));
-        }
-        dto.setTimedOutPlayerIds(
-                ordered.stream()
-                        .filter(id -> id != null && lobbyService != null && lobbyService.isPlayerTimedOutInPlaying(id))
-                        .toList()
-        );
-        Map<Long, String> assignedCharacterColorByUserId = Map.of();
-        if (lobbyService != null) {
-            Map<Long, String> resolvedAssignedColors = lobbyService.resolvePlayingAssignedCharacterColorsForPlayers(ordered);
-            assignedCharacterColorByUserId = resolvedAssignedColors == null ? Map.of() : resolvedAssignedColors;
-        }
-        Map<Long, User> usersById = new java.util.HashMap<>();
-        if (userRepository != null) {
-            Iterable<User> resolvedUsers = userRepository.findAllById(ordered);
-            if (resolvedUsers != null) {
-                for (User user : resolvedUsers) {
-                    if (user != null && user.getId() != null) {
-                        usersById.put(user.getId(), user);
-                    }
-                }
-            }
-        }
+        SharedBroadcastContext context = sharedContext == null ? new SharedBroadcastContext() : sharedContext;
+        dto.setSessionId(context.getSessionId());
+        dto.setTimedOutPlayerIds(context.getTimedOutPlayerIds());
+        Map<Long, String> assignedCharacterColorByUserId = context.getAssignedCharacterColorByUserId();
+        Map<Long, User> usersById = context.getUsersById();
 
         List<PlayerHandViewDTO> playerHands = new ArrayList<>();
         for (Long ownerId : ordered) {
@@ -135,6 +124,84 @@ public class GameStateBroadcastMapper {
         }
         dto.setPlayers(playerHands);
         return dto;
+    }
+
+    public SharedBroadcastContext buildSharedContext(Game game) {
+        SharedBroadcastContext context = new SharedBroadcastContext();
+        if (game == null) {
+            return context;
+        }
+
+        List<Long> ordered = game.getOrderedPlayerIds();
+        if (ordered == null) {
+            ordered = List.of();
+        }
+
+        if (lobbyService != null) {
+            context.setSessionId(lobbyService.findPlayingSessionIdForPlayers(ordered));
+            context.setTimedOutPlayerIds(
+                    ordered.stream()
+                            .filter(id -> id != null && lobbyService.isPlayerTimedOutInPlaying(id))
+                            .toList()
+            );
+
+            Map<Long, String> resolvedAssignedColors = lobbyService.resolvePlayingAssignedCharacterColorsForPlayers(ordered);
+            context.setAssignedCharacterColorByUserId(resolvedAssignedColors == null ? Map.of() : resolvedAssignedColors);
+        }
+
+        if (userRepository != null) {
+            Map<Long, User> usersById = new HashMap<>();
+            Iterable<User> resolvedUsers = userRepository.findAllById(ordered);
+            if (resolvedUsers != null) {
+                for (User user : resolvedUsers) {
+                    if (user != null && user.getId() != null) {
+                        usersById.put(user.getId(), user);
+                    }
+                }
+            }
+            context.setUsersById(usersById);
+        }
+        return context;
+    }
+
+    public static class SharedBroadcastContext {
+        private String sessionId;
+        private List<Long> timedOutPlayerIds = List.of();
+        private Map<Long, String> assignedCharacterColorByUserId = Map.of();
+        private Map<Long, User> usersById = Map.of();
+
+        public String getSessionId() {
+            return sessionId;
+        }
+
+        public void setSessionId(String sessionId) {
+            this.sessionId = sessionId;
+        }
+
+        public List<Long> getTimedOutPlayerIds() {
+            return timedOutPlayerIds;
+        }
+
+        public void setTimedOutPlayerIds(List<Long> timedOutPlayerIds) {
+            this.timedOutPlayerIds = timedOutPlayerIds == null ? List.of() : timedOutPlayerIds;
+        }
+
+        public Map<Long, String> getAssignedCharacterColorByUserId() {
+            return assignedCharacterColorByUserId;
+        }
+
+        public void setAssignedCharacterColorByUserId(Map<Long, String> assignedCharacterColorByUserId) {
+            this.assignedCharacterColorByUserId =
+                    assignedCharacterColorByUserId == null ? Map.of() : assignedCharacterColorByUserId;
+        }
+
+        public Map<Long, User> getUsersById() {
+            return usersById;
+        }
+
+        public void setUsersById(Map<Long, User> usersById) {
+            this.usersById = usersById == null ? Map.of() : usersById;
+        }
     }
 
     private GameMoveEventDTO toMoveEventDTO(GameMoveEvent event) {

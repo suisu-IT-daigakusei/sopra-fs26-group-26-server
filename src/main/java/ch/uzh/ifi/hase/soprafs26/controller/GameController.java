@@ -106,6 +106,15 @@ public class GameController {
         return gameService.isMyTurn(gameId, userId);
     }
 
+    @GetMapping("/games/{gameId}/turn-owner")
+    @ResponseStatus(HttpStatus.OK)
+    public Map<String, Long> getTurnOwner(
+            @PathVariable String gameId,
+            @RequestHeader("Authorization") String token) {
+        Long currentTurnUserId = gameService.getCurrentTurnOwnerForToken(gameId, token);
+        return currentTurnUserId == null ? Map.of() : Map.of("currentTurnUserId", currentTurnUserId);
+    }
+
     // get the players own hand aka only the visible cards are being shown
     @GetMapping("/games/{gameId}/my-hand")
     @ResponseStatus(HttpStatus.OK)

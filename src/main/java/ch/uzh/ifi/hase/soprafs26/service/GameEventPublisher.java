@@ -45,12 +45,14 @@ public class GameEventPublisher {
         if (lobbyService != null) {
             recipientIds.addAll(lobbyService.findPlayingSpectatorIdsForPlayers(playerIds));
         }
+        GameStateBroadcastMapper.SharedBroadcastContext sharedContext =
+                gameStateBroadcastMapper.buildSharedContext(game);
 
         for (Long userId : recipientIds) {
             if (userId == null) {
                 continue;
             }
-            GameStateBroadcastDTO dto = gameStateBroadcastMapper.toBroadcastForViewer(game, userId);
+            GameStateBroadcastDTO dto = gameStateBroadcastMapper.toBroadcastForViewer(game, userId, sharedContext);
             messagingTemplate.convertAndSendToUser(String.valueOf(userId), USER_QUEUE_GAME_STATE, dto);
         }
     }
