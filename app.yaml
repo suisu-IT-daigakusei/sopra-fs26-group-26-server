@@ -12,8 +12,8 @@ runtime_config:
   runtime_version: 17
 
 automatic_scaling:
-  max_num_instances: 1 # max_instances: 1
-  min_num_instances: 1  # App Engine flex requires at least 1
+  max_num_instances: 1
+  min_num_instances: 0
 
 env_variables:
   SPRING_PROFILES_ACTIVE: "gcp"
