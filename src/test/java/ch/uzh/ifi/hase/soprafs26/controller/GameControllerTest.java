@@ -5,9 +5,12 @@ import ch.uzh.ifi.hase.soprafs26.config.GameMoveWebConfig;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.entity.Card;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.PeekSelectionDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.GameSyncStateDTO;
 import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
 import ch.uzh.ifi.hase.soprafs26.service.GameService;
+import ch.uzh.ifi.hase.soprafs26.service.HotEndpointRateLimitException;
+import ch.uzh.ifi.hase.soprafs26.service.HotEndpointRateLimiter;
 import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,6 +56,9 @@ public class GameControllerTest {
 
         @MockitoBean
         private LobbyService lobbyService;
+
+        @MockitoBean
+        private HotEndpointRateLimiter hotEndpointRateLimiter;
 
         @Test
         void postMoveDraw_interceptorAllows_returns204() throws Exception {
@@ -246,7 +252,8 @@ public class GameControllerTest {
         Mockito.when(gameService.getDiscardPileTopCard("game-123")).thenReturn(mockCard);
 
         // 2. Action & 3. Assertion
-        mockMvc.perform(get("/games/game-123/discard-pile/top"))
+        mockMvc.perform(get("/games/game-123/discard-pile/top")
+                .header("Authorization", "valid-token"))
                .andExpect(status().isOk())
                .andExpect(jsonPath("$.code", is("AS")))
                .andExpect(jsonPath("$.visibility", is(true)))
@@ -259,7 +266,8 @@ public class GameControllerTest {
         Mockito.when(gameService.getDiscardPileTopCard("game-123")).thenReturn(null);
 
         // 2. Action & 3. Assertion
-        mockMvc.perform(get("/games/game-123/discard-pile/top"))
+        mockMvc.perform(get("/games/game-123/discard-pile/top")
+                .header("Authorization", "valid-token"))
                .andExpect(status().isOk())
                .andExpect(jsonPath("$").doesNotExist()); // Proves the JSON body is completely empty
     }
@@ -271,7 +279,8 @@ public class GameControllerTest {
                .thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Game not found"));
 
         // 2. Action & 3. Assertion
-        mockMvc.perform(get("/games/invalid-game/discard-pile/top"))
+        mockMvc.perform(get("/games/invalid-game/discard-pile/top")
+                .header("Authorization", "valid-token"))
                .andExpect(status().isNotFound()); // Proves the controller correctly passes the 404 to the frontend
     }
 
@@ -284,6 +293,58 @@ public class GameControllerTest {
                 .header("Authorization", "valid-token"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.currentTurnUserId", is(2)));
+    }
+
+    @Test
+    void getSyncState_validRequest_returnsCompactPayload() throws Exception {
+        Card discardTop = new Card();
+        discardTop.setCode("8H");
+        discardTop.setValue(8);
+        discardTop.setVisibility(true);
+
+        Card drawnCard = new Card();
+        drawnCard.setCode("QS");
+        drawnCard.setValue(12);
+        drawnCard.setVisibility(true);
+
+        Card handCard = new Card();
+        handCard.setCode("3D");
+        handCard.setValue(3);
+        handCard.setVisibility(false);
+
+        GameSyncStateDTO dto = new GameSyncStateDTO();
+        dto.setStatus("ROUND_ACTIVE");
+        dto.setCurrentTurnUserId(3L);
+        dto.setDiscardTop(discardTop);
+        dto.setDrawnCard(drawnCard);
+        dto.setMyHand(List.of(handCard));
+        dto.setRematchDecisionSeconds(60L);
+
+        Mockito.when(gameService.getSyncStateSnapshotForToken("game-123", "valid-token"))
+                .thenReturn(new GameService.SyncStateSnapshot(dto, "\"etag-sync-1\""));
+
+        mockMvc.perform(get("/games/game-123/sync-state")
+                .header("Authorization", "valid-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status", is("ROUND_ACTIVE")))
+                .andExpect(jsonPath("$.currentTurnUserId", is(3)))
+                .andExpect(jsonPath("$.discardTop.code", is("8H")))
+                .andExpect(jsonPath("$.drawnCard.code", is("QS")))
+                .andExpect(jsonPath("$.myHand[0].code", is("3D")))
+                .andExpect(jsonPath("$.rematchDecisionSeconds", is(60)));
+    }
+
+    @Test
+    void getSyncState_matchingIfNoneMatch_returnsNotModified() throws Exception {
+        GameSyncStateDTO dto = new GameSyncStateDTO();
+        dto.setStatus("ROUND_ACTIVE");
+        Mockito.when(gameService.getSyncStateSnapshotForToken("game-123", "valid-token"))
+                .thenReturn(new GameService.SyncStateSnapshot(dto, "\"etag-sync-2\""));
+
+        mockMvc.perform(get("/games/game-123/sync-state")
+                .header("Authorization", "valid-token")
+                .header("If-None-Match", "\"etag-sync-2\""))
+                .andExpect(status().isNotModified());
     }
 
     @Test
@@ -305,6 +366,21 @@ public class GameControllerTest {
         mockMvc.perform(get("/games/game-123/turn-owner")
                 .header("Authorization", "bad-token"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void getTurnOwner_rateLimited_returnsRetryAfterHeader() throws Exception {
+        Mockito.doThrow(new HotEndpointRateLimitException("Too many sync requests; retry shortly", 2L))
+                .when(hotEndpointRateLimiter)
+                .enforceHotReadLimit(eq("turn-owner"), eq("valid-token"), any(), any());
+
+        mockMvc.perform(get("/games/game-123/turn-owner")
+                .header("Authorization", "valid-token"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.error", is("Too Many Requests")))
+                .andExpect(jsonPath("$.status", is(429)))
+                .andExpect(jsonPath("$.message", is("Too many sync requests; retry shortly")))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().string("Retry-After", "2"));
     }
 
     @Test

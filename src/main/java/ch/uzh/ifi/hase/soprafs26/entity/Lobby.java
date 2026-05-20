@@ -4,11 +4,15 @@ import jakarta.persistence.*;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Entity
-@Table(name = "lobbies")
+@Table(name = "lobbies", indexes = {
+        @Index(name = "idx_lobby_status_player_set_key", columnList = "status,player_set_key")
+})
 public class Lobby implements Serializable {
 
     private static final long serialVersionUID = 1L;
@@ -39,6 +43,9 @@ public class Lobby implements Serializable {
 
     @Column(nullable = false)
     private String status = "WAITING"; // WAITING or PLAYING // prob later SPECTATING
+
+    @Column(name = "player_set_key", nullable = false, length = 256)
+    private String playerSetKey = "";
 
     // Per-lobby AFK timeout used while the game is active.
     @Column(nullable = false)
@@ -114,6 +121,9 @@ public class Lobby implements Serializable {
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
 
+    public String getPlayerSetKey() { return playerSetKey; }
+    public void setPlayerSetKey(String playerSetKey) { this.playerSetKey = playerSetKey; }
+
     public Long getAfkTimeoutSeconds() { return afkTimeoutSeconds; }
     public void setAfkTimeoutSeconds(Long afkTimeoutSeconds) { this.afkTimeoutSeconds = afkTimeoutSeconds; }
 
@@ -149,5 +159,31 @@ public class Lobby implements Serializable {
     public Map<Long, Boolean> getPlayerReadyByUserId() { return playerReadyByUserId; }
     public void setPlayerReadyByUserId(Map<Long, Boolean> playerReadyByUserId) {
         this.playerReadyByUserId = playerReadyByUserId;
+    }
+
+    @PrePersist
+    @PreUpdate
+    private void refreshPlayerSetKey() {
+        this.playerSetKey = buildPlayerSetKey(playerIds);
+    }
+
+    private String buildPlayerSetKey(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return "";
+        }
+        Set<Long> distinctIds = new LinkedHashSet<>();
+        for (Long id : ids) {
+            if (id != null) {
+                distinctIds.add(id);
+            }
+        }
+        if (distinctIds.isEmpty()) {
+            return "";
+        }
+        return distinctIds.stream()
+                .sorted()
+                .map(String::valueOf)
+                .reduce((left, right) -> left + "," + right)
+                .orElse("");
     }
 }

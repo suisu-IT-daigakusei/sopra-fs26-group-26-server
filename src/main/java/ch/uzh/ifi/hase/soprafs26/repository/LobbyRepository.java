@@ -17,6 +17,8 @@ public interface LobbyRepository extends JpaRepository<Lobby, Long> {
 
     List<Lobby> findByStatus(String status);
 
+    List<Lobby> findByStatusAndPlayerSetKey(String status, String playerSetKey);
+
     List<Lobby> findByIsPublicTrueAndStatus(String status);
 
     @Query("select case when count(l) > 0 then true else false end from Lobby l where l.status = :status and :userId member of l.playerIds")

@@ -1,32 +1,45 @@
 package ch.uzh.ifi.hase.soprafs26.controller;
 
 import ch.uzh.ifi.hase.soprafs26.entity.Card;
+import ch.uzh.ifi.hase.soprafs26.entity.Game;
+import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.PeekSelectionDTO;
-import org.springframework.web.bind.annotation.*;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.GameStateBroadcastDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.GameSyncStateDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.mapper.DTOMapper;
+import ch.uzh.ifi.hase.soprafs26.service.GameService;
+import ch.uzh.ifi.hase.soprafs26.service.HotEndpointRateLimiter;
+import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import ch.uzh.ifi.hase.soprafs26.entity.Game;
-import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
-import ch.uzh.ifi.hase.soprafs26.service.GameService;
-import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
-import org.springframework.web.server.ResponseStatusException;
-import ch.uzh.ifi.hase.soprafs26.entity.Game;
-import ch.uzh.ifi.hase.soprafs26.rest.dto.GameStateBroadcastDTO;
-import ch.uzh.ifi.hase.soprafs26.rest.mapper.DTOMapper;
 
 @RestController
 public class GameController {
 
     private final GameService gameService;
     private final LobbyService lobbyService;
+    private final HotEndpointRateLimiter hotEndpointRateLimiter;
 
-    public GameController(GameService gameService, LobbyService lobbyService) {
+    public GameController(GameService gameService,
+                          LobbyService lobbyService,
+                          HotEndpointRateLimiter hotEndpointRateLimiter) {
         this.gameService = gameService;
         this.lobbyService = lobbyService;
+        this.hotEndpointRateLimiter = hotEndpointRateLimiter;
+    }
+
+    private void enforceHotReadLimit(String endpointKey, String token, HttpServletRequest request) {
+        String forwardedForHeader = request == null ? null : request.getHeader("X-Forwarded-For");
+        String remoteAddress = request == null ? null : request.getRemoteAddr();
+        hotEndpointRateLimiter.enforceHotReadLimit(endpointKey, token, forwardedForHeader, remoteAddress);
     }
 
     private int requireIntBodyField(Map<String, ?> body, String field) {
@@ -57,6 +70,23 @@ public class GameController {
         } catch (NumberFormatException ignored) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, field + " must be a number");
         }
+    }
+
+    private boolean etagMatches(String ifNoneMatchHeader, String etag) {
+        if (etag == null || etag.isBlank() || ifNoneMatchHeader == null || ifNoneMatchHeader.isBlank()) {
+            return false;
+        }
+        String[] candidates = ifNoneMatchHeader.split(",");
+        for (String candidate : candidates) {
+            String normalized = candidate == null ? "" : candidate.trim();
+            if (normalized.isEmpty()) {
+                continue;
+            }
+            if ("*".equals(normalized) || etag.equals(normalized)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // endpoint according to REST interface
@@ -92,7 +122,11 @@ public class GameController {
     // Backlog #9: Implement logic to always render the DiscardPile top card with its face-up value
     @GetMapping("/games/{gameId}/discard-pile/top")
     @ResponseStatus(HttpStatus.OK)
-    public Card getDiscardPileTopCard(@PathVariable String gameId) {
+    public Card getDiscardPileTopCard(
+            @PathVariable String gameId,
+            @RequestHeader(value = "Authorization", required = false) String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("discard-top", token, request);
         return gameService.getDiscardPileTopCard(gameId);
 
     }
@@ -110,7 +144,9 @@ public class GameController {
     @ResponseStatus(HttpStatus.OK)
     public Map<String, Long> getTurnOwner(
             @PathVariable String gameId,
-            @RequestHeader("Authorization") String token) {
+            @RequestHeader("Authorization") String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("turn-owner", token, request);
         Long currentTurnUserId = gameService.getCurrentTurnOwnerForToken(gameId, token);
         return currentTurnUserId == null ? Map.of() : Map.of("currentTurnUserId", currentTurnUserId);
     }
@@ -120,8 +156,36 @@ public class GameController {
     @ResponseStatus(HttpStatus.OK)
     public List<Card> getMyHand(
             @PathVariable String gameId,
-            @RequestHeader("Authorization") String token) {
+            @RequestHeader("Authorization") String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("my-hand", token, request);
         return gameService.getMyHand(gameId, token);
+    }
+
+    @GetMapping("/games/{gameId}/sync-state")
+    public ResponseEntity<GameSyncStateDTO> getSyncState(
+            @PathVariable String gameId,
+            @RequestHeader("Authorization") String token,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch,
+            HttpServletRequest request) {
+        enforceHotReadLimit("sync-state", token, request);
+        GameService.SyncStateSnapshot syncSnapshot = gameService.getSyncStateSnapshotForToken(gameId, token);
+        String etag = syncSnapshot.getEtag();
+
+        if (etagMatches(ifNoneMatch, etag)) {
+            ResponseEntity.BodyBuilder notModifiedBuilder = ResponseEntity.status(HttpStatus.NOT_MODIFIED)
+                    .cacheControl(CacheControl.noStore());
+            if (etag != null && !etag.isBlank()) {
+                notModifiedBuilder.eTag(etag);
+            }
+            return notModifiedBuilder.build();
+        }
+
+        ResponseEntity.BodyBuilder okBuilder = ResponseEntity.ok().cacheControl(CacheControl.noStore());
+        if (etag != null && !etag.isBlank()) {
+            okBuilder.eTag(etag);
+        }
+        return okBuilder.body(syncSnapshot.getPayload());
     }
 
     // Example empty stubs of move endpoints to demonstrate the interceptor from #30
@@ -229,7 +293,9 @@ public class GameController {
     @ResponseStatus(HttpStatus.OK)
     public Map<String, String> getPostRoundLobby(
             @PathVariable String gameId,
-            @RequestHeader("Authorization") String token) {
+            @RequestHeader("Authorization") String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("post-round-lobby", token, request);
         String waitingSessionId = gameService.getPostRoundLobbySessionForToken(gameId, token);
         return waitingSessionId == null || waitingSessionId.isBlank()
                 ? Map.of()
@@ -277,7 +343,9 @@ public class GameController {
     @ResponseStatus(HttpStatus.OK)
     public Card getDrawnCard(
             @PathVariable String gameId,
-            @RequestHeader("Authorization") String token) {
+            @RequestHeader("Authorization") String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("drawn-card", token, request);
         return gameService.getDrawnCard(gameId, token);
     }
 

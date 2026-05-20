@@ -3,6 +3,7 @@ package ch.uzh.ifi.hase.soprafs26.service;
 import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
 import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 import ch.uzh.ifi.hase.soprafs26.config.settings.LobbySettingsProperties;
+import ch.uzh.ifi.hase.soprafs26.config.settings.ServerSettingsProperties;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
@@ -31,6 +32,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 @Transactional
@@ -45,9 +47,25 @@ public class LobbyService {
     private final GameService gameService;
     private final LobbyChatService lobbyChatService;
     private final LobbySettingsProperties lobbySettings;
+    private final ServerSettingsProperties serverSettings;
     // Players that timed out while being in a PLAYING lobby.
     // They stay part of the active game and trigger an automatic Cabo when their turn starts.
     private final Set<Long> timedOutInPlayingPlayerIds = ConcurrentHashMap.newKeySet();
+    // Tiny transient lookup caches to reduce duplicate DB scans under reconnect bursts.
+    private final Map<Long, TimedCacheValue<String>> waitingSessionByUserIdCache = new ConcurrentHashMap<>();
+    private final Map<String, TimedCacheValue<PlayingLobbySnapshot>> playingSnapshotByPlayerSetCache = new ConcurrentHashMap<>();
+    private final AtomicLong lastTransientCacheCleanupMs = new AtomicLong(0L);
+    private static final long TRANSIENT_CACHE_CLEANUP_MIN_INTERVAL_MS = 1000L;
+
+    private static final class TimedCacheValue<T> {
+        private final T value;
+        private final long expiresAtMs;
+
+        private TimedCacheValue(T value, long expiresAtMs) {
+            this.value = value;
+            this.expiresAtMs = expiresAtMs;
+        }
+    }
     private static final List<String> CHARACTER_COLOR_ORDER = List.of(
             "navy_blue",
             "light_blue",
@@ -105,6 +123,7 @@ public class LobbyService {
                         LobbyEventPublisher lobbyEventPublisher,
                         OnlineUsersEventPublisher onlineUsersEventPublisher,
                         LobbySettingsProperties lobbySettings,
+                        ServerSettingsProperties serverSettings,
                         @Lazy DisconnectService disconnectService,
                         @Lazy GameService gameService,
                         @Lazy LobbyChatService lobbyChatService) {
@@ -114,6 +133,7 @@ public class LobbyService {
         this.lobbyEventPublisher = lobbyEventPublisher;
         this.onlineUsersEventPublisher = onlineUsersEventPublisher;
         this.lobbySettings = lobbySettings;
+        this.serverSettings = serverSettings == null ? new ServerSettingsProperties() : serverSettings;
         this.disconnectService = disconnectService;
         this.gameService = gameService;
         this.lobbyChatService = lobbyChatService;
@@ -634,12 +654,97 @@ public class LobbyService {
         return lobbyRepository.findByStatusAndParticipantId("WAITING", userId);
     }
 
+    private long resolveWaitingLookupCacheTtlMs() {
+        long configured = serverSettings.getWaitingLobbyLookupCacheTtlMs();
+        return Math.max(1L, configured);
+    }
+
+    private long resolvePlayingSnapshotCacheTtlMs() {
+        long configured = serverSettings.getPlayingLobbySnapshotCacheTtlMs();
+        return Math.max(1L, configured);
+    }
+
+    private int resolveTransientLookupCacheMaxEntries() {
+        int configured = serverSettings.getMaxTransientLookupCacheEntries();
+        return Math.max(64, configured);
+    }
+
+    private String buildPlayerSetCacheKey(List<Long> gamePlayerIds) {
+        if (gamePlayerIds == null || gamePlayerIds.isEmpty()) {
+            return "";
+        }
+        return gamePlayerIds.stream()
+                .filter(id -> id != null)
+                .distinct()
+                .sorted()
+                .map(String::valueOf)
+                .reduce((left, right) -> left + "," + right)
+                .orElse("");
+    }
+
+    private PlayingLobbySnapshot copySnapshot(PlayingLobbySnapshot snapshot) {
+        if (snapshot == null) {
+            return new PlayingLobbySnapshot(null, Map.of(), List.of());
+        }
+        Map<Long, String> copiedColors = snapshot.getAssignedCharacterColorsByUserId() == null
+                ? Map.of()
+                : new HashMap<>(snapshot.getAssignedCharacterColorsByUserId());
+        List<Long> copiedSpectators = snapshot.getSpectatorIds() == null
+                ? List.of()
+                : new ArrayList<>(snapshot.getSpectatorIds());
+        return new PlayingLobbySnapshot(snapshot.getSessionId(), copiedColors, copiedSpectators);
+    }
+
+    private void maybeCleanupTransientLookupCaches(long nowMs) {
+        long previousCleanup = lastTransientCacheCleanupMs.get();
+        if (nowMs - previousCleanup < TRANSIENT_CACHE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastTransientCacheCleanupMs.compareAndSet(previousCleanup, nowMs)) {
+            return;
+        }
+
+        pruneExpiredEntries(waitingSessionByUserIdCache, nowMs);
+        pruneExpiredEntries(playingSnapshotByPlayerSetCache, nowMs);
+        enforceCacheEntryCap(waitingSessionByUserIdCache);
+        enforceCacheEntryCap(playingSnapshotByPlayerSetCache);
+    }
+
+    private <K, V> void pruneExpiredEntries(Map<K, TimedCacheValue<V>> cache, long nowMs) {
+        cache.entrySet().removeIf(entry -> entry.getValue() == null || entry.getValue().expiresAtMs <= nowMs);
+    }
+
+    private <K, V> void enforceCacheEntryCap(Map<K, TimedCacheValue<V>> cache) {
+        int maxEntries = resolveTransientLookupCacheMaxEntries();
+        while (cache.size() > maxEntries) {
+            K firstKey = cache.keySet().stream().findFirst().orElse(null);
+            if (firstKey == null) {
+                break;
+            }
+            cache.remove(firstKey);
+        }
+    }
+
     public String findWaitingSessionIdForPlayer(Long userId) {
-        return findWaitingLobbiesForParticipant(userId).stream()
+        if (userId == null) {
+            return null;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        TimedCacheValue<String> cached = waitingSessionByUserIdCache.get(userId);
+        if (cached != null && cached.expiresAtMs > nowMs) {
+            return cached.value;
+        }
+
+        String resolvedSessionId = findWaitingLobbiesForParticipant(userId).stream()
                 .filter(l -> l.getPlayerIds() != null && l.getPlayerIds().contains(userId))
                 .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)))
                 .map(Lobby::getSessionId)
                 .orElse(null);
+        long ttlMs = resolveWaitingLookupCacheTtlMs();
+        waitingSessionByUserIdCache.put(userId, new TimedCacheValue<>(resolvedSessionId, nowMs + ttlMs));
+        maybeCleanupTransientLookupCaches(nowMs);
+        return resolvedSessionId;
     }
 
     private boolean isLobbyNewer(Lobby candidate, Lobby reference) {
@@ -1521,7 +1626,26 @@ public class LobbyService {
         if (gamePlayerIds == null || gamePlayerIds.isEmpty()) {
             return null;
         }
-        Set<Long> expectedPlayerSet = new LinkedHashSet<>(gamePlayerIds);
+        Set<Long> expectedPlayerSet = new LinkedHashSet<>();
+        for (Long playerId : gamePlayerIds) {
+            if (playerId != null) {
+                expectedPlayerSet.add(playerId);
+            }
+        }
+        if (expectedPlayerSet.isEmpty()) {
+            return null;
+        }
+
+        String playerSetKey = buildPlayerSetCacheKey(gamePlayerIds);
+        if (!playerSetKey.isEmpty()) {
+            Lobby exactIndexedMatch = lobbyRepository.findByStatusAndPlayerSetKey("PLAYING", playerSetKey).stream()
+                    .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)))
+                    .orElse(null);
+            if (exactIndexedMatch != null) {
+                return exactIndexedMatch;
+            }
+        }
+
         List<Lobby> playingLobbies = lobbyRepository.findByStatus("PLAYING");
         return playingLobbies.stream()
                 .filter(lobby -> lobby.getPlayerIds() != null)
@@ -1537,32 +1661,47 @@ public class LobbyService {
 
     // lookup of matching PLAYING status lobby while round-end resolve is in progress (same player set)
     public String findPlayingSessionIdForPlayers(List<Long> gamePlayerIds) {
-        Lobby matchingLobby = findBestPlayingLobbyForPlayers(gamePlayerIds);
-        return matchingLobby == null ? null : matchingLobby.getSessionId();
+        PlayingLobbySnapshot snapshot = resolvePlayingLobbySnapshotForPlayers(gamePlayerIds);
+        return snapshot == null ? null : snapshot.getSessionId();
     }
 
     public PlayingLobbySnapshot resolvePlayingLobbySnapshotForPlayers(List<Long> gamePlayerIds) {
-        Lobby matchingLobby = findBestPlayingLobbyForPlayers(gamePlayerIds);
-        if (matchingLobby == null) {
+        String cacheKey = buildPlayerSetCacheKey(gamePlayerIds);
+        if (cacheKey.isEmpty()) {
             return new PlayingLobbySnapshot(null, Map.of(), List.of());
         }
-        Map<Long, String> assignedColors = resolveAssignedCharacterColorsForLobby(matchingLobby);
-        List<Long> spectatorIds = matchingLobby.getSpectatorIds() == null
-                ? List.of()
-                : matchingLobby.getSpectatorIds().stream()
-                        .filter(id -> id != null)
-                        .distinct()
-                        .toList();
-        return new PlayingLobbySnapshot(matchingLobby.getSessionId(), assignedColors, spectatorIds);
+        long nowMs = System.currentTimeMillis();
+        TimedCacheValue<PlayingLobbySnapshot> cached = playingSnapshotByPlayerSetCache.get(cacheKey);
+        if (cached != null && cached.expiresAtMs > nowMs && cached.value != null) {
+            return copySnapshot(cached.value);
+        }
+
+        Lobby matchingLobby = findBestPlayingLobbyForPlayers(gamePlayerIds);
+        PlayingLobbySnapshot resolvedSnapshot;
+        if (matchingLobby == null) {
+            resolvedSnapshot = new PlayingLobbySnapshot(null, Map.of(), List.of());
+        } else {
+            Map<Long, String> assignedColors = resolveAssignedCharacterColorsForLobby(matchingLobby);
+            List<Long> spectatorIds = matchingLobby.getSpectatorIds() == null
+                    ? List.of()
+                    : matchingLobby.getSpectatorIds().stream()
+                            .filter(id -> id != null)
+                            .distinct()
+                            .toList();
+            resolvedSnapshot = new PlayingLobbySnapshot(matchingLobby.getSessionId(), assignedColors, spectatorIds);
+        }
+        long ttlMs = resolvePlayingSnapshotCacheTtlMs();
+        playingSnapshotByPlayerSetCache.put(cacheKey, new TimedCacheValue<>(copySnapshot(resolvedSnapshot), nowMs + ttlMs));
+        maybeCleanupTransientLookupCaches(nowMs);
+        return resolvedSnapshot;
     }
 
     public Map<Long, String> resolvePlayingAssignedCharacterColorsForPlayers(List<Long> gamePlayerIds) {
-        Lobby matchingLobby = findBestPlayingLobbyForPlayers(gamePlayerIds);
-        if (matchingLobby == null || matchingLobby.getPlayerIds() == null || matchingLobby.getPlayerIds().isEmpty()) {
+        PlayingLobbySnapshot snapshot = resolvePlayingLobbySnapshotForPlayers(gamePlayerIds);
+        if (snapshot == null || snapshot.getAssignedCharacterColorsByUserId() == null) {
             return Map.of();
         }
-
-        return resolveAssignedCharacterColorsForLobby(matchingLobby);
+        return snapshot.getAssignedCharacterColorsByUserId();
     }
 
     private Map<Long, String> resolveAssignedCharacterColorsForLobby(Lobby matchingLobby) {

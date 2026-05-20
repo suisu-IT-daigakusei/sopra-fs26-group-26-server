@@ -25,21 +25,21 @@ public class DisconnectService {
     private final LobbyService lobbyService;
     private final GameService gameService;
     private final TimeoutSettingsProperties timeoutSettings;
+    private final WebSocketSessionTracker webSocketSessionTracker;
 
     private final Map<Long, ScheduledFuture<?>> activeTimers = new ConcurrentHashMap<>();
-    // Tracks currently active websocket sessions per user so we only start the 60s timer
-    // when the last session disconnects.
-    private final Map<Long, Set<String>> activeWebSocketSessions = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(5);
 
     public DisconnectService(UserRepository userRepository,
                              @Lazy LobbyService lobbyService,
                              @Lazy GameService gameService,
-                             TimeoutSettingsProperties timeoutSettings) {
+                             TimeoutSettingsProperties timeoutSettings,
+                             WebSocketSessionTracker webSocketSessionTracker) {
         this.userRepository = userRepository;
         this.lobbyService = lobbyService;
         this.gameService = gameService;
         this.timeoutSettings = timeoutSettings;
+        this.webSocketSessionTracker = webSocketSessionTracker;
     }
 
     /**
@@ -175,8 +175,13 @@ public class DisconnectService {
             userRepository.save(user);
 
             activeTimers.remove(user.getId());
-            activeWebSocketSessions.remove(user.getId());
+            webSocketSessionTracker.clearSessions(user.getId());
         }
+    }
+
+    @Scheduled(fixedDelayString = "#{@serverSettingsProperties.websocketSessionPruneIntervalMs}")
+    public void pruneStaleWebSocketSessions() {
+        webSocketSessionTracker.pruneStaleSessions();
     }
 
     public void handleReconnect(Long userId) {
@@ -189,9 +194,7 @@ public class DisconnectService {
             return;
         }
 
-        activeWebSocketSessions
-                .computeIfAbsent(userId, ignored -> ConcurrentHashMap.newKeySet())
-                .add(sessionId);
+        webSocketSessionTracker.registerSession(userId, sessionId);
         cancelDisconnectTimer(userId);
         lobbyService.clearTimedOutPlayingFlag(userId);
     }
@@ -201,13 +204,7 @@ public class DisconnectService {
             return;
         }
 
-        Set<String> sessions = activeWebSocketSessions.get(userId);
-        if (sessions != null) {
-            sessions.remove(sessionId);
-            if (sessions.isEmpty()) {
-                activeWebSocketSessions.remove(userId);
-            }
-        }
+        webSocketSessionTracker.unregisterSession(userId, sessionId);
 
         if (!hasActiveWebSocketSession(userId)) {
             handleConnectionLoss(userId);
@@ -226,8 +223,11 @@ public class DisconnectService {
     }
 
     private boolean hasActiveWebSocketSession(Long userId) {
-        Set<String> sessions = activeWebSocketSessions.get(userId);
-        return sessions != null && !sessions.isEmpty();
+        return webSocketSessionTracker.hasActiveSession(userId);
+    }
+
+    public List<String> getTrackedWebSocketSessionIds(Long userId) {
+        return webSocketSessionTracker.getTrackedSessionIds(userId);
     }
 
     /**
@@ -248,7 +248,7 @@ public class DisconnectService {
         if (user.getStatus() == UserStatus.OFFLINE) {
             // Idempotency guard for already-processed offline users.
             activeTimers.remove(userId);
-            activeWebSocketSessions.remove(userId);
+            webSocketSessionTracker.clearSessions(userId);
             return;
         }
 
@@ -256,7 +256,7 @@ public class DisconnectService {
         lobbyService.handlePermanentDisconnect(userId);
         
         activeTimers.remove(userId);
-        activeWebSocketSessions.remove(userId);
+        webSocketSessionTracker.clearSessions(userId);
         long secondsSinceHeartbeat = -1L;
         Instant lastHeartbeat = user.getLastHeartbeat();
         if (lastHeartbeat != null) {

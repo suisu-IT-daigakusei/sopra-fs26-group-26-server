@@ -2904,7 +2904,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
             scheduler, 
             null, 
             sessionRepository, gameSettings, 
-            null, mockPublisher
+            null, mockPublisher, null
         );
 
         // 2. Action
@@ -2947,7 +2947,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         GameService serviceFull = new GameService(
             gameRepository, deckOfCardsAPIService, userRepository, gameEventPublisher, 
             scheduler, lobbyService, sessionRepository, gameSettings, 
-            null, mockPublisher
+            null, mockPublisher, null
         );
 
         // 2. Action
@@ -2985,7 +2985,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         GameService serviceNoPublisher = new GameService(
             gameRepository, deckOfCardsAPIService, userRepository, gameEventPublisher, 
             scheduler, lobbyService, sessionRepository, gameSettings, 
-            null, null 
+            null, null, null 
         );
 
         // 2. Action

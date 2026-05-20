@@ -1,5 +1,6 @@
 package ch.uzh.ifi.hase.soprafs26.config;
 
+import ch.uzh.ifi.hase.soprafs26.config.settings.ServerSettingsProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.ChannelRegistration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
@@ -10,9 +11,12 @@ import org.springframework.web.socket.config.annotation.*;
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final StompAuthChannelInterceptor stompAuthChannelInterceptor;
+    private final ServerSettingsProperties serverSettings;
 
-    public WebSocketConfig(StompAuthChannelInterceptor stompAuthChannelInterceptor) {
+    public WebSocketConfig(StompAuthChannelInterceptor stompAuthChannelInterceptor,
+                           ServerSettingsProperties serverSettings) {
         this.stompAuthChannelInterceptor = stompAuthChannelInterceptor;
+        this.serverSettings = serverSettings;
     }
 
     @Override
@@ -39,6 +43,25 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     // register the interceptor for client -> server communication
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
+        registration.taskExecutor()
+                .corePoolSize(serverSettings.getWebsocketInboundCorePoolSize())
+                .maxPoolSize(serverSettings.getWebsocketInboundMaxPoolSize())
+                .queueCapacity(serverSettings.getWebsocketInboundQueueCapacity());
         registration.interceptors(stompAuthChannelInterceptor);
+    }
+
+    @Override
+    public void configureClientOutboundChannel(ChannelRegistration registration) {
+        registration.taskExecutor()
+                .corePoolSize(serverSettings.getWebsocketOutboundCorePoolSize())
+                .maxPoolSize(serverSettings.getWebsocketOutboundMaxPoolSize())
+                .queueCapacity(serverSettings.getWebsocketOutboundQueueCapacity());
+    }
+
+    @Override
+    public void configureWebSocketTransport(WebSocketTransportRegistration registry) {
+        registry.setSendTimeLimit(serverSettings.getWebsocketSendTimeLimitMs())
+                .setSendBufferSizeLimit(serverSettings.getWebsocketSendBufferSizeLimitBytes())
+                .setMessageSizeLimit(serverSettings.getWebsocketMessageSizeLimitBytes());
     }
 }

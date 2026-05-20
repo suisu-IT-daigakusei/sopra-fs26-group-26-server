@@ -37,13 +37,21 @@ class DisconnectServiceTest {
     @Mock
     private GameService gameService;
 
+    @Mock
+    private WebSocketSessionTracker webSocketSessionTracker;
+
     private DisconnectService disconnectService;
     private static final String AUTO_LOGOUT_TOKEN = "keep-token";
 
     @BeforeEach
     void setUp() {
         TimeoutSettingsProperties timeoutSettings = new TimeoutSettingsProperties();
-        disconnectService = new DisconnectService(userRepository, lobbyService, gameService, timeoutSettings);
+        disconnectService = new DisconnectService(
+                userRepository,
+                lobbyService,
+                gameService,
+                timeoutSettings,
+                webSocketSessionTracker);
     }
 
     @Test

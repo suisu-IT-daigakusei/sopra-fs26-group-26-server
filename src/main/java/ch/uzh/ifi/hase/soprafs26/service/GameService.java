@@ -18,9 +18,12 @@ import java.util.Set;
 import java.util.Arrays;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.Iterator;
+import java.util.zip.CRC32;
 
 
 import ch.uzh.ifi.hase.soprafs26.config.settings.GameSettingsProperties;
+import ch.uzh.ifi.hase.soprafs26.config.settings.ServerSettingsProperties;
 import ch.uzh.ifi.hase.soprafs26.entity.Card;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.entity.GameMoveEvent;
@@ -32,6 +35,7 @@ import ch.uzh.ifi.hase.soprafs26.repository.GameRepository;
 import ch.uzh.ifi.hase.soprafs26.repository.SessionRepository;
 import ch.uzh.ifi.hase.soprafs26.rest.mapper.DTOMapper;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CardDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.GameSyncStateDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.PeekSelectionDTO;
 import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 import ch.uzh.ifi.hase.soprafs26.util.PeekType;
@@ -41,6 +45,7 @@ import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import java.time.Instant;
 import org.springframework.context.ApplicationEventPublisher;
@@ -54,6 +59,45 @@ public class GameService {
     public static final String REMATCH_DECISION_CONTINUE = "CONTINUE";
     public static final String REMATCH_DECISION_FRESH = "FRESH";
     public static final String REMATCH_DECISION_NONE = "NONE";
+    private static final long CACHE_CLEANUP_MIN_INTERVAL_MS = 1000L;
+
+    public static final class SyncStateSnapshot {
+        private final GameSyncStateDTO payload;
+        private final String etag;
+
+        public SyncStateSnapshot(GameSyncStateDTO payload, String etag) {
+            this.payload = payload;
+            this.etag = etag;
+        }
+
+        public GameSyncStateDTO getPayload() {
+            return payload;
+        }
+
+        public String getEtag() {
+            return etag;
+        }
+    }
+
+    private static final class CachedAuthenticatedUser {
+        private final User user;
+        private final long expiresAtMs;
+
+        private CachedAuthenticatedUser(User user, long expiresAtMs) {
+            this.user = user;
+            this.expiresAtMs = expiresAtMs;
+        }
+    }
+
+    private static final class CachedSyncState {
+        private final SyncStateSnapshot snapshot;
+        private final long expiresAtMs;
+
+        private CachedSyncState(SyncStateSnapshot snapshot, long expiresAtMs) {
+            this.snapshot = snapshot;
+            this.expiresAtMs = expiresAtMs;
+        }
+    }
 
     private static final List<String> FALLBACK_CABO_CARD_CODES = Arrays.asList(
             "AS", "AD", "AC", "AH",
@@ -80,6 +124,7 @@ public class GameService {
     private final LobbyChatService lobbyChatService;
     private final SessionRepository sessionRepository;
     private final GameSettingsProperties gameSettings;
+    private final ServerSettingsProperties serverSettings;
     // map to store tasks - key: gameId, value: scheduled task
     private final Map<String, ScheduledFuture<?>> gameTimers = new ConcurrentHashMap<>();
     // per-game count so an outdated scheduled ability timer cannot execute 
@@ -95,6 +140,12 @@ public class GameService {
     private static final String MOVE_ZONE_HAND = "HAND";
     private static final long INTRO_PHASE_SECONDS = 10L;
     private final ApplicationEventPublisher eventPublisher;
+    private final Map<String, CachedAuthenticatedUser> authenticatedUserByTokenCache = new ConcurrentHashMap<>();
+    private final AtomicLong lastAuthCacheCleanupMs = new AtomicLong(0L);
+    private final Map<String, CachedSyncState> syncStateCacheByViewerAndGame = new ConcurrentHashMap<>();
+    private final AtomicLong lastSyncStateCacheCleanupMs = new AtomicLong(0L);
+    private final Map<String, Long> rematchDecisionDedupUntilByKey = new ConcurrentHashMap<>();
+    private final AtomicLong lastRematchDecisionDedupCleanupMs = new AtomicLong(0L);
 
     private Object getRematchResolutionLock(String gameId) {
         return rematchResolutionLocks.computeIfAbsent(gameId, ignored -> new Object());
@@ -155,7 +206,18 @@ public class GameService {
     public GameService(GameRepository gameRepository, DeckOfCardsAPIService deckOfCardsAPIService,
                        UserRepository userRepository, GameEventPublisher gameEventPublisher,
                        ScheduledExecutorService scheduler, GameSettingsProperties gameSettings) {
-        this(gameRepository, deckOfCardsAPIService, userRepository, gameEventPublisher, scheduler, null, null, gameSettings, null, null);
+        this(
+                gameRepository,
+                deckOfCardsAPIService,
+                userRepository,
+                gameEventPublisher,
+                scheduler,
+                null,
+                null,
+                gameSettings,
+                null,
+                null,
+                null);
     }
 
     // Used by Spring: allows game lifecycle -> lobby lifecycle handoff after round end.
@@ -166,7 +228,8 @@ public class GameService {
                        @Lazy SessionRepository sessionRepository,
                        GameSettingsProperties gameSettings,
                        @Lazy LobbyChatService lobbyChatService,
-                       ApplicationEventPublisher eventPublisher) {
+                       ApplicationEventPublisher eventPublisher,
+                       @Lazy ServerSettingsProperties serverSettings) {
         this.gameRepository = gameRepository;
         this.deckOfCardsAPIService = deckOfCardsAPIService;
         this.userRepository = userRepository;
@@ -177,6 +240,7 @@ public class GameService {
         this.gameSettings = gameSettings;
         this.lobbyChatService = lobbyChatService;
         this.eventPublisher = eventPublisher;
+        this.serverSettings = serverSettings == null ? new ServerSettingsProperties() : serverSettings;
     }
 
     public Game startGame(List<Long> playerIds) {
@@ -286,8 +350,9 @@ public class GameService {
         Game resumedGame = startGame(playerIds);
     
         resumedGame.setResumedFromSessionId(sessionId);
-
-        return gameRepository.save(resumedGame);
+        Game saved = gameRepository.save(resumedGame);
+        invalidateSyncStateCacheForGame(saved.getId());
+        return saved;
     }
 
     private List<Long> sanitizePlayerIds(List<Long> playerIds) {
@@ -453,25 +518,244 @@ public class GameService {
         return userId.equals(game.getCurrentPlayerId());
     }
 
-    public Long getCurrentTurnOwnerForToken(String gameId, String token) {
-        if (token == null || token.isBlank()) {
+    private long resolveAuthTokenCacheTtlMs() {
+        return Math.max(1L, serverSettings.getAuthTokenLookupCacheTtlMs());
+    }
+
+    private long resolveSyncStateCacheTtlMs() {
+        return Math.max(1L, serverSettings.getSyncStateCacheTtlMs());
+    }
+
+    private long resolveRematchDecisionDedupWindowMs() {
+        return Math.max(1L, serverSettings.getRematchDuplicateDecisionWindowMs());
+    }
+
+    private String normalizeToken(String token) {
+        return token == null ? "" : token.trim();
+    }
+
+    private User requireAuthenticatedUser(String token) {
+        String normalizedToken = normalizeToken(token);
+        if (normalizedToken.isBlank()) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
         }
-        User user = userRepository.findByToken(token);
+
+        long nowMs = System.currentTimeMillis();
+        CachedAuthenticatedUser cachedUser = authenticatedUserByTokenCache.get(normalizedToken);
+        if (cachedUser != null && cachedUser.expiresAtMs > nowMs && cachedUser.user != null) {
+            return cachedUser.user;
+        }
+
+        User user = userRepository.findByToken(normalizedToken);
         if (user == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
         }
+
+        long ttlMs = resolveAuthTokenCacheTtlMs();
+        authenticatedUserByTokenCache.put(normalizedToken, new CachedAuthenticatedUser(user, nowMs + ttlMs));
+        maybeCleanupAuthenticatedUserCache(nowMs);
+        return user;
+    }
+
+    private void maybeCleanupAuthenticatedUserCache(long nowMs) {
+        long previousCleanupMs = lastAuthCacheCleanupMs.get();
+        if (nowMs - previousCleanupMs < CACHE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastAuthCacheCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+        Iterator<Map.Entry<String, CachedAuthenticatedUser>> iterator = authenticatedUserByTokenCache.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, CachedAuthenticatedUser> entry = iterator.next();
+            CachedAuthenticatedUser cachedUser = entry.getValue();
+            if (cachedUser == null || cachedUser.expiresAtMs <= nowMs || cachedUser.user == null) {
+                iterator.remove();
+            }
+        }
+    }
+
+    private boolean isSpectatorForPlayingLobby(List<Long> orderedPlayers, Long userId) {
+        if (userId == null || lobbyService == null) {
+            return false;
+        }
+        List<Long> spectatorIds = lobbyService.findPlayingSpectatorIdsForPlayers(orderedPlayers);
+        return spectatorIds != null && spectatorIds.contains(userId);
+    }
+
+    private Card copyCardForResponse(Card sourceCard, boolean forceVisible) {
+        if (sourceCard == null) {
+            return null;
+        }
+        Card copy = new Card();
+        copy.setCode(sourceCard.getCode());
+        copy.setValue(sourceCard.getValue());
+        copy.setVisibility(forceVisible || sourceCard.getVisibility());
+        return copy;
+    }
+
+    private Card resolveDiscardTopCardForResponse(Game game) {
+        if (game == null || game.getDiscardPile() == null || game.getDiscardPile().isEmpty()) {
+            return null;
+        }
+        Card topCard = game.getDiscardPile().get(game.getDiscardPile().size() - 1);
+        return copyCardForResponse(topCard, true);
+    }
+
+    private Card resolveDrawnCardForViewer(Game game, Long viewerUserId, boolean participant) {
+        if (game == null || viewerUserId == null) {
+            return null;
+        }
+
+        Card drawnCard = game.getDrawnCard();
+        if (drawnCard == null) {
+            return null;
+        }
+
+        if (allInPlayCardsReveal(game.getStatus()) && participant) {
+            return copyCardForResponse(drawnCard, true);
+        }
+
+        if (!viewerUserId.equals(game.getCurrentPlayerId())) {
+            return null;
+        }
+
+        return copyCardForResponse(drawnCard, false);
+    }
+
+    private String buildSyncStateCacheKey(String gameId, Long viewerUserId) {
+        String normalizedGameId = gameId == null ? "" : gameId.trim();
+        return normalizedGameId + "|" + String.valueOf(viewerUserId);
+    }
+
+    private String computeSyncStateEtag(GameSyncStateDTO syncState) {
+        CRC32 crc = new CRC32();
+        updateChecksum(crc, syncState == null ? null : syncState.getStatus());
+        updateChecksum(crc, syncState == null ? null : syncState.getCurrentTurnUserId());
+        updateChecksum(crc, syncState == null ? null : syncState.getPostRoundSessionId());
+        updateChecksum(crc, syncState == null ? null : syncState.getRematchDecisionSeconds());
+        updateChecksumWithCard(crc, syncState == null ? null : syncState.getDiscardTop());
+        updateChecksumWithCard(crc, syncState == null ? null : syncState.getDrawnCard());
+        updateChecksumWithCards(crc, syncState == null ? null : syncState.getMyHand());
+        return "\"" + Long.toHexString(crc.getValue()) + "\"";
+    }
+
+    private void updateChecksum(CRC32 crc, Object value) {
+        String normalized = value == null ? "null" : String.valueOf(value);
+        byte[] bytes = normalized.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        crc.update(bytes, 0, bytes.length);
+        crc.update('|');
+    }
+
+    private void updateChecksumWithCard(CRC32 crc, Card card) {
+        if (card == null) {
+            updateChecksum(crc, null);
+            return;
+        }
+        updateChecksum(crc, card.getCode());
+        updateChecksum(crc, card.getValue());
+        updateChecksum(crc, card.getVisibility());
+    }
+
+    private void updateChecksumWithCards(CRC32 crc, List<Card> cards) {
+        if (cards == null || cards.isEmpty()) {
+            updateChecksum(crc, "[]");
+            return;
+        }
+        for (Card card : cards) {
+            updateChecksumWithCard(crc, card);
+        }
+    }
+
+    private void maybeCleanupSyncStateCache(long nowMs) {
+        long previousCleanupMs = lastSyncStateCacheCleanupMs.get();
+        if (nowMs - previousCleanupMs < CACHE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastSyncStateCacheCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+        Iterator<Map.Entry<String, CachedSyncState>> iterator = syncStateCacheByViewerAndGame.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, CachedSyncState> entry = iterator.next();
+            CachedSyncState cachedSyncState = entry.getValue();
+            if (cachedSyncState == null
+                    || cachedSyncState.expiresAtMs <= nowMs
+                    || cachedSyncState.snapshot == null
+                    || cachedSyncState.snapshot.getPayload() == null
+                    || cachedSyncState.snapshot.getEtag() == null) {
+                iterator.remove();
+            }
+        }
+    }
+
+    private GameSyncStateDTO buildSyncStatePayload(Game game, User viewer, boolean participant) {
+        GameSyncStateDTO syncState = new GameSyncStateDTO();
+        syncState.setStatus(game.getStatus() == null ? null : game.getStatus().name());
+        syncState.setCurrentTurnUserId(game.getCurrentPlayerId());
+        syncState.setDiscardTop(resolveDiscardTopCardForResponse(game));
+        syncState.setDrawnCard(resolveDrawnCardForViewer(game, viewer.getId(), participant));
+        syncState.setMyHand(participant
+                ? new ArrayList<>(game.getPlayerHands().getOrDefault(viewer.getId(), List.of()))
+                : List.of());
+
+        if (participant) {
+            syncState.setRematchDecisionSeconds(game.getRematchDecisionSeconds());
+            if (game.getStatus() == GameStatus.ROUND_AWAITING_REMATCH || game.getStatus() == GameStatus.ROUND_ENDED) {
+                String waitingSessionId = lobbyService == null
+                        ? null
+                        : lobbyService.findWaitingSessionIdForPlayer(viewer.getId());
+                if (waitingSessionId != null && !waitingSessionId.isBlank()) {
+                    syncState.setPostRoundSessionId(waitingSessionId);
+                }
+            }
+        }
+        return syncState;
+    }
+
+    @Transactional(readOnly = true)
+    public SyncStateSnapshot getSyncStateSnapshotForToken(String gameId, String token) {
+        User viewer = requireAuthenticatedUser(token);
+        Game game = getGameById(gameId);
+        List<Long> orderedPlayers = game.getOrderedPlayerIds() == null
+                ? List.of()
+                : game.getOrderedPlayerIds();
+        boolean participant = orderedPlayers.contains(viewer.getId());
+        boolean spectator = !participant && isSpectatorForPlayingLobby(orderedPlayers, viewer.getId());
+        if (!participant && !spectator) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed to view this game");
+        }
+
+        long nowMs = System.currentTimeMillis();
+        String cacheKey = buildSyncStateCacheKey(gameId, viewer.getId());
+        CachedSyncState cachedSyncState = syncStateCacheByViewerAndGame.get(cacheKey);
+        if (cachedSyncState != null && cachedSyncState.expiresAtMs > nowMs && cachedSyncState.snapshot != null) {
+            return cachedSyncState.snapshot;
+        }
+
+        GameSyncStateDTO syncState = buildSyncStatePayload(game, viewer, participant);
+        SyncStateSnapshot snapshot = new SyncStateSnapshot(syncState, computeSyncStateEtag(syncState));
+        long ttlMs = resolveSyncStateCacheTtlMs();
+        syncStateCacheByViewerAndGame.put(cacheKey, new CachedSyncState(snapshot, nowMs + ttlMs));
+        maybeCleanupSyncStateCache(nowMs);
+        return snapshot;
+    }
+
+    @Transactional(readOnly = true)
+    public GameSyncStateDTO getSyncStateForToken(String gameId, String token) {
+        return getSyncStateSnapshotForToken(gameId, token).getPayload();
+    }
+
+    @Transactional(readOnly = true)
+    public Long getCurrentTurnOwnerForToken(String gameId, String token) {
+        User user = requireAuthenticatedUser(token);
 
         Game game = getGameById(gameId);
         List<Long> orderedPlayers = game.getOrderedPlayerIds() == null
                 ? List.of()
                 : game.getOrderedPlayerIds();
         boolean participant = orderedPlayers.contains(user.getId());
-        boolean spectator = false;
-        if (!participant && lobbyService != null) {
-            List<Long> spectatorIds = lobbyService.findPlayingSpectatorIdsForPlayers(orderedPlayers);
-            spectator = spectatorIds != null && spectatorIds.contains(user.getId());
-        }
+        boolean spectator = !participant && isSpectatorForPlayingLobby(orderedPlayers, user.getId());
         if (!participant && !spectator) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed to view this game");
         }
@@ -480,14 +764,9 @@ public class GameService {
     }
 
     // get the player's own hand
+    @Transactional(readOnly = true)
     public List<Card> getMyHand(String gameId, String token) {
-        if (token == null || token.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-        User user = userRepository.findByToken(token);
-        if (user == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User user = requireAuthenticatedUser(token);
         Game game = getGameById(gameId);
         List<Card> hand = game.getPlayerHands().get(user.getId());
         if (hand == null) {
@@ -499,13 +778,7 @@ public class GameService {
 
     // Add a "Current Player" check to all incoming move requests; return a 403 Forbidden if it's not their turn. #30
     public void verifyMoveCallerIsCurrentPlayer(String gameId, String authorizationToken) {
-        if (authorizationToken == null || authorizationToken.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-        User user = userRepository.findByToken(authorizationToken);
-        if (user == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User user = requireAuthenticatedUser(authorizationToken);
         if (lobbyService != null) {
             lobbyService.clearTimedOutPlayingFlag(user.getId());
         }
@@ -519,13 +792,7 @@ public class GameService {
      // #47 initial peek + per-user broadcast 
      // #49 authentication guards.
     public void applyPeek(String gameId, String token, PeekSelectionDTO body) {
-        if (token == null || token.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-        User authenticatedUser = userRepository.findByToken(token);
-        if (authenticatedUser == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User authenticatedUser = requireAuthenticatedUser(token);
         if (body == null || body.getPeekType() == null || body.getPeekType().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "peekType is required");
         }
@@ -1272,20 +1539,51 @@ public class GameService {
         advanceTurnToNextPlayer(gameId);
     }
 
+    private void maybeCleanupRematchDecisionDedupCache(long nowMs) {
+        long previousCleanupMs = lastRematchDecisionDedupCleanupMs.get();
+        if (nowMs - previousCleanupMs < CACHE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastRematchDecisionDedupCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+        Iterator<Map.Entry<String, Long>> iterator = rematchDecisionDedupUntilByKey.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, Long> entry = iterator.next();
+            Long expiresAtMs = entry.getValue();
+            if (expiresAtMs == null || expiresAtMs <= nowMs) {
+                iterator.remove();
+            }
+        }
+    }
+
+    private boolean shouldSkipDuplicateRematchDecision(String gameId, Long userId, String normalizedDecision) {
+        if (gameId == null || gameId.isBlank() || userId == null || normalizedDecision == null || normalizedDecision.isBlank()) {
+            return false;
+        }
+        long nowMs = System.currentTimeMillis();
+        long dedupWindowMs = resolveRematchDecisionDedupWindowMs();
+        String dedupKey = gameId + "|" + userId + "|" + normalizedDecision;
+        Long dedupUntilMs = rematchDecisionDedupUntilByKey.get(dedupKey);
+        if (dedupUntilMs != null && dedupUntilMs > nowMs) {
+            return true;
+        }
+        rematchDecisionDedupUntilByKey.put(dedupKey, nowMs + dedupWindowMs);
+        maybeCleanupRematchDecisionDedupCache(nowMs);
+        return false;
+    }
+
     public void submitRematchDecision(String gameId, String token, String decision) {
-        if (token == null || token.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-        User user = userRepository.findByToken(token);
-        if (user == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User user = requireAuthenticatedUser(token);
 
         String normalizedDecision = String.valueOf(decision).trim().toUpperCase(Locale.ROOT);
         if (!REMATCH_DECISION_CONTINUE.equals(normalizedDecision)
                 && !REMATCH_DECISION_FRESH.equals(normalizedDecision)
                 && !REMATCH_DECISION_NONE.equals(normalizedDecision)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "decision must be CONTINUE, FRESH, or NONE");
+        }
+        if (shouldSkipDuplicateRematchDecision(gameId, user.getId(), normalizedDecision)) {
+            return;
         }
 
         synchronized (getRematchResolutionLock(gameId)) {
@@ -1328,14 +1626,9 @@ public class GameService {
         return getPostRoundLobbySessionForToken(gameId, token);
     }
 
+    @Transactional(readOnly = true)
     public String getPostRoundLobbySessionForToken(String gameId, String token) {
-        if (token == null || token.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-        User user = userRepository.findByToken(token);
-        if (user == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User user = requireAuthenticatedUser(token);
         Game game = getGameById(gameId);
         if (game.getOrderedPlayerIds() == null || !game.getOrderedPlayerIds().contains(user.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not a player in this game");
@@ -1346,14 +1639,9 @@ public class GameService {
         return lobbyService.findWaitingSessionIdForPlayer(user.getId());
     }
 
+    @Transactional(readOnly = true)
     public long getRematchDecisionSeconds(String gameId, String token) {
-        if (token == null || token.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-        User user = userRepository.findByToken(token);
-        if (user == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User user = requireAuthenticatedUser(token);
         Game game = getGameById(gameId);
         if (game.getOrderedPlayerIds() == null || !game.getOrderedPlayerIds().contains(user.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not a player in this game");
@@ -1361,14 +1649,9 @@ public class GameService {
         return game.getRematchDecisionSeconds();
     }
 
+    @Transactional(readOnly = true)
     public Map<String, Long> getGameRuntimeConfig(String gameId, String token) {
-        if (token == null || token.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-        User user = userRepository.findByToken(token);
-        if (user == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User user = requireAuthenticatedUser(token);
         Game game = getGameById(gameId);
         if (game.getOrderedPlayerIds() == null || !game.getOrderedPlayerIds().contains(user.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not a player in this game");
@@ -1572,14 +1855,9 @@ public class GameService {
                 .findFirst();
     }
 
+    @Transactional(readOnly = true)
     public Optional<Game> getActiveGameForToken(String token) {
-        if (token == null || token.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-        User user = userRepository.findByToken(token);
-        if (user == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User user = requireAuthenticatedUser(token);
         return findActiveGameForUser(user.getId())
                 .or(() -> findActiveGameForSpectator(user.getId()));
     }
@@ -1590,9 +1868,21 @@ public class GameService {
     }
 
 
+    private void invalidateSyncStateCacheForGame(String gameId) {
+        if (gameId == null || gameId.isBlank()) {
+            return;
+        }
+        String keyPrefix = gameId.trim() + "|";
+        syncStateCacheByViewerAndGame.keySet().removeIf(key -> key != null && key.startsWith(keyPrefix));
+    }
+
     // save in db and send filtered representations to all players 
     private Game saveGameAndBroadcast(Game game) {
         Game saved = gameRepository.save(game);
+        if (saved == null) {
+            saved = game;
+        }
+        invalidateSyncStateCacheForGame(saved.getId());
         gameEventPublisher.publishFilteredState(saved);
         return saved;
     }
@@ -2036,15 +2326,9 @@ public class GameService {
 
     }
     // #20 drawn card only reveals value to the right player
+    @Transactional(readOnly = true)
     public Card getDrawnCard(String gameId, String token) {
-        if (token == null || token.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
-
-        User user = userRepository.findByToken(token);
-        if (user == null) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
-        }
+        User user = requireAuthenticatedUser(token);
 
         Game game = getGameById(gameId);
         List<Long> players = game.getOrderedPlayerIds();
