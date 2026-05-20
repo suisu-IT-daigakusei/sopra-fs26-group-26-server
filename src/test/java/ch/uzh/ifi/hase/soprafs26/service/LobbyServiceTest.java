@@ -21,11 +21,16 @@ import org.mockito.MockitoAnnotations;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.WaitingLobbyPlayerRowDTO;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.test.util.ReflectionTestUtils;
+import java.lang.reflect.Method;
+import java.util.Set;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -910,4 +915,1751 @@ public class LobbyServiceTest {
         assertEquals(0, mockLobby.getSpectatorIds().size(), "Der Zuschauer haette entfernt werden muessen.");
         assertEquals(1, mockLobby.getPlayerIds().size(), "Die Liste der aktiven Spieler darf sich nicht aendern.");
     }
+
+	/**
+	 * Helper Method: Safely grabs the private timedOutInPlayingPlayerIds set
+	 * so we can manipulate and assert against it directly in isolation.
+	 */
+	@SuppressWarnings("unchecked")
+	private Set<Long> getTimedOutSet() {
+		return (Set<Long>) ReflectionTestUtils.getField(lobbyService, "timedOutInPlayingPlayerIds");
+	}
+
+	@Test
+	public void isPlayerTimedOutInPlaying_nullId_returnsFalse() {
+		assertFalse(lobbyService.isPlayerTimedOutInPlaying(null));
+	}
+
+	@Test
+	public void isPlayerTimedOutInPlaying_notInSet_returnsFalse() {
+		getTimedOutSet().clear();
+		assertFalse(lobbyService.isPlayerTimedOutInPlaying(1L));
+	}
+
+	@Test
+	public void isPlayerTimedOutInPlaying_inSet_returnsTrue() {
+		getTimedOutSet().add(1L);
+		assertTrue(lobbyService.isPlayerTimedOutInPlaying(1L));
+	}
+
+	@Test
+	public void clearTimedOutPlayingFlag_nullId_doesNothing() {
+		getTimedOutSet().add(1L);
+		lobbyService.clearTimedOutPlayingFlag(null);
+		
+		// Verifies the set was left untouched
+		assertTrue(getTimedOutSet().contains(1L)); 
+	}
+
+	@Test
+	public void clearTimedOutPlayingFlag_validId_removesFromSet() {
+		getTimedOutSet().add(1L);
+		lobbyService.clearTimedOutPlayingFlag(1L);
+		
+		// Verifies it was successfully cleared
+		assertFalse(getTimedOutSet().contains(1L));
+	}
+
+	@Test
+	public void clearTimedOutPlayingFlags_nullList_doesNothing() throws Exception {
+		getTimedOutSet().add(1L);
+
+		// Access the private method using Java Reflection
+		Method method = LobbyService.class.getDeclaredMethod("clearTimedOutPlayingFlags", List.class);
+		method.setAccessible(true);
+		method.invoke(lobbyService, (List<Long>) null);
+
+		// Verifies the method returned early without modifying the set
+		assertTrue(getTimedOutSet().contains(1L));
+	}
+
+	@Test
+	public void clearTimedOutPlayingFlags_validList_removesAll() throws Exception {
+		getTimedOutSet().addAll(List.of(1L, 2L, 3L));
+
+		// Access the private method using Java Reflection
+		Method method = LobbyService.class.getDeclaredMethod("clearTimedOutPlayingFlags", List.class);
+		method.setAccessible(true);
+		method.invoke(lobbyService, List.of(1L, 2L));
+
+		// Verifies the specified IDs were removed, but others were left intact
+		assertFalse(getTimedOutSet().contains(1L));
+		assertFalse(getTimedOutSet().contains(2L));
+		assertTrue(getTimedOutSet().contains(3L)); 
+	}
+
+	@Test
+	public void isUserInLobbyContext_nullId_returnsFalse() {
+		assertFalse(lobbyService.isUserInLobbyContext(null));
+		
+		// Verify the repository was completely protected from the null value
+		Mockito.verify(lobbyRepository, Mockito.never())
+               .existsByStatusAndParticipantId(Mockito.anyString(), Mockito.anyLong());
+	}
+
+	@Test
+	public void isUserInLobbyContext_inWaitingLobby_returnsTrue() {
+		Mockito.when(lobbyRepository.existsByStatusAndParticipantId("WAITING", 1L)).thenReturn(true);
+		
+		assertTrue(lobbyService.isUserInLobbyContext(1L));
+
+		// Verify short-circuiting: It should NOT check for PLAYING if WAITING is already true
+		Mockito.verify(lobbyRepository, Mockito.never())
+               .existsByStatusAndParticipantId("PLAYING", 1L);
+	}
+
+	@Test
+	public void isUserInLobbyContext_inPlayingLobby_returnsTrue() {
+		Mockito.when(lobbyRepository.existsByStatusAndParticipantId("WAITING", 1L)).thenReturn(false);
+		Mockito.when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 1L)).thenReturn(true);
+		
+		assertTrue(lobbyService.isUserInLobbyContext(1L));
+	}
+
+	@Test
+	public void isUserInLobbyContext_notInAnyLobby_returnsFalse() {
+		Mockito.when(lobbyRepository.existsByStatusAndParticipantId("WAITING", 1L)).thenReturn(false);
+		Mockito.when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 1L)).thenReturn(false);
+		
+		assertFalse(lobbyService.isUserInLobbyContext(1L));
+	}
+
+	@Test
+	public void getPlayingLobbyPlayerIdsSnapshot_noPlayingLobbies_returnsEmptySet() {
+		// 1. Setup: No active games
+		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of());
+
+		// 2. Action
+		Set<Long> result = lobbyService.getPlayingLobbyPlayerIdsSnapshot();
+
+		// 3. Assertion
+		assertTrue(result.isEmpty());
+	}
+
+	@Test
+	public void getPlayingLobbyPlayerIdsSnapshot_lobbyOrPlayerIdsNull_skipsSafely() {
+		// 1. Setup: Create a list with tricky null values to hit the inner `if` branches
+		Lobby nullLobby = null;
+		
+		Lobby lobbyWithNullIds = new Lobby();
+		lobbyWithNullIds.setPlayerIds(null); 
+		
+		Lobby validLobby = new Lobby();
+		validLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+
+		// Pass all three into the mock
+		Mockito.when(lobbyRepository.findByStatus("PLAYING"))
+			   .thenReturn(java.util.Arrays.asList(nullLobby, lobbyWithNullIds, validLobby));
+
+		// 2. Action
+		Set<Long> result = lobbyService.getPlayingLobbyPlayerIdsSnapshot();
+
+		// 3. Assertion: It should skip the bad data and only grab the valid IDs
+		assertEquals(2, result.size());
+		assertTrue(result.containsAll(List.of(1L, 2L)));
+	}
+
+	@Test
+	public void getPlayingLobbyPlayerIdsSnapshot_validLobbies_returnsAggregatedAndDeduplicatedSet() {
+		// 1. Setup: Two lobbies, where Player 3 is accidentally in both
+		Lobby lobby1 = new Lobby();
+		lobby1.setPlayerIds(new ArrayList<>(List.of(1L, 2L, 3L)));
+		
+		Lobby lobby2 = new Lobby();
+		lobby2.setPlayerIds(new ArrayList<>(List.of(3L, 4L, 5L))); 
+
+		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of(lobby1, lobby2));
+
+		// 2. Action
+		Set<Long> result = lobbyService.getPlayingLobbyPlayerIdsSnapshot();
+
+		// 3. Assertion: It should aggregate everyone and deduplicate Player 3 automatically
+		assertEquals(5, result.size());
+		assertTrue(result.containsAll(List.of(1L, 2L, 3L, 4L, 5L)));
+	}
+
+	@Test
+	public void findLatestPlayingLobbyForSpectator_nullId_returnsEmpty() {
+		// 1. Action
+		Optional<Lobby> result = lobbyService.findLatestPlayingLobbyForSpectator(null);
+
+		// 2. Assertion
+		assertTrue(result.isEmpty());
+		
+		// Verify early exit protected the repository
+		Mockito.verify(lobbyRepository, Mockito.never())
+			   .findByStatusAndParticipantId(Mockito.anyString(), Mockito.anyLong());
+	}
+
+	@Test
+	public void findLatestPlayingLobbyForSpectator_noMatchingLobbies_returnsEmpty() {
+		// 1. Setup
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L))
+			   .thenReturn(List.of());
+
+		// 2. Action
+		Optional<Lobby> result = lobbyService.findLatestPlayingLobbyForSpectator(1L);
+
+		// 3. Assertion
+		assertTrue(result.isEmpty());
+	}
+
+	@Test
+	public void findLatestPlayingLobbyForSpectator_filtersOutInvalidLobbies_returnsEmpty() {
+		// 1. Setup: Create messy lobbies to hit every single `null` and `contains` branch in the filter
+		Lobby nullLobby = null;
+
+		Lobby nullSpectatorsLobby = new Lobby();
+		nullSpectatorsLobby.setId(10L);
+		nullSpectatorsLobby.setSpectatorIds(null); // Hits the spectatorIds != null check
+
+		Lobby missingSpectatorLobby = new Lobby();
+		missingSpectatorLobby.setId(20L);
+		missingSpectatorLobby.setSpectatorIds(new ArrayList<>(List.of(2L, 3L))); // Hits the contains(userId) check
+
+		// The repository returns all this bad data
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L))
+			   .thenReturn(java.util.Arrays.asList(nullLobby, nullSpectatorsLobby, missingSpectatorLobby));
+
+		// 2. Action
+		Optional<Lobby> result = lobbyService.findLatestPlayingLobbyForSpectator(1L);
+
+		// 3. Assertion: The stream filter should successfully block all of them
+		assertTrue(result.isEmpty());
+	}
+
+	@Test
+	public void findLatestPlayingLobbyForSpectator_multipleValidLobbies_returnsLatestById() {
+		// 1. Setup: User is a spectator in 3 different active lobbies
+		Lobby olderLobby = new Lobby();
+		olderLobby.setId(10L);
+		olderLobby.setSpectatorIds(new ArrayList<>(List.of(1L)));
+
+		Lobby newerLobby = new Lobby();
+		newerLobby.setId(50L);
+		newerLobby.setSpectatorIds(new ArrayList<>(List.of(1L)));
+
+		Lobby middleLobby = new Lobby();
+		middleLobby.setId(30L);
+		middleLobby.setSpectatorIds(new ArrayList<>(List.of(1L)));
+
+		// Note: Returned out of order to ensure the Comparator does the sorting
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L))
+			   .thenReturn(List.of(olderLobby, middleLobby, newerLobby));
+
+		// 2. Action
+		Optional<Lobby> result = lobbyService.findLatestPlayingLobbyForSpectator(1L);
+		
+		// 3. Assertion: It should successfully isolate the lobby with ID 50
+		assertTrue(result.isPresent());
+		assertEquals(50L, result.get().getId());
+	}
+
+	@Test
+	public void findWebsocketGraceSecondsForUser_nullId_returnsNull() {
+		// 1. Action & Assertion
+		assertNull(lobbyService.findWebsocketGraceSecondsForUser(null));
+		
+		// 2. Verify repository was completely protected
+		Mockito.verify(lobbyRepository, Mockito.never())
+			   .findByStatusAndParticipantId(Mockito.anyString(), Mockito.anyLong());
+	}
+
+	@Test
+	public void findWebsocketGraceSecondsForUser_validWaitingLobby_returnsWaitingGrace() {
+		// 1. Setup: User has a WAITING lobby with a valid grace period
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setWebsocketGraceSeconds(45L);
+		
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
+			   .thenReturn(List.of(waitingLobby));
+
+		// 2. Action
+		Long result = lobbyService.findWebsocketGraceSecondsForUser(1L);
+
+		// 3. Assertion
+		assertEquals(45L, result);
+		
+		// Verify short-circuiting: It should skip the PLAYING check entirely
+		Mockito.verify(lobbyRepository, Mockito.never())
+			   .findByStatusAndParticipantId("PLAYING", 1L);
+	}
+
+	@Test
+	public void findWebsocketGraceSecondsForUser_waitingGraceNull_playingGraceValid_returnsPlayingGrace() {
+		// 1. Setup: WAITING lobby exists but has a null grace period. PLAYING lobby has a valid one.
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setWebsocketGraceSeconds(null); // Hits the != null branch
+		
+		Lobby playingLobby = new Lobby();
+		playingLobby.setWebsocketGraceSeconds(60L);
+
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
+			   .thenReturn(List.of(waitingLobby));
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L))
+			   .thenReturn(List.of(playingLobby));
+
+		// 2. Action
+		Long result = lobbyService.findWebsocketGraceSecondsForUser(1L);
+
+		// 3. Assertion: It successfully fell back to the PLAYING lobby
+		assertEquals(60L, result);
+	}
+
+	@Test
+	public void findWebsocketGraceSecondsForUser_waitingGraceZero_playingGraceZero_returnsNull() {
+		// 1. Setup: Both lobbies exist, but both have 0 for their grace period
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setWebsocketGraceSeconds(0L); // Hits the > 0 branch
+		
+		Lobby playingLobby = new Lobby();
+		playingLobby.setWebsocketGraceSeconds(0L); // Hits the > 0 branch
+
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
+			   .thenReturn(List.of(waitingLobby));
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L))
+			   .thenReturn(List.of(playingLobby));
+
+		// 2. Action
+		Long result = lobbyService.findWebsocketGraceSecondsForUser(1L);
+
+		// 3. Assertion: Both failed the validation, so it defaults to null
+		assertNull(result);
+	}
+
+	@Test
+	public void findWebsocketGraceSecondsForUser_noLobbies_returnsNull() {
+		// 1. Setup: User is not in any lobbies
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId(Mockito.anyString(), Mockito.anyLong()))
+			   .thenReturn(List.of());
+
+		// 2. Action
+		Long result = lobbyService.findWebsocketGraceSecondsForUser(1L);
+
+		// 3. Assertion
+		assertNull(result);
+	}
+
+	@Test
+	public void resolveJoinableSessionIdsForUsers_nullOrEmptyInput_returnsEmptyMap() {
+		// Tests null input
+		assertTrue(lobbyService.resolveJoinableSessionIdsForUsers(null).isEmpty());
+		
+		// Tests empty list
+		assertTrue(lobbyService.resolveJoinableSessionIdsForUsers(List.of()).isEmpty());
+
+		// Tests a list that contains only null values (hits the private toRequestedUserIdSet null-filter)
+		List<Long> listWithNulls = new ArrayList<>();
+		listWithNulls.add(null);
+		assertTrue(lobbyService.resolveJoinableSessionIdsForUsers(listWithNulls).isEmpty());
+	}
+
+	@Test
+	public void resolveJoinableSessionIdsForUsers_processesLobbiesAndFiltersInvalidSessions() {
+		// 1. Setup: Create mock lobbies to hit every possible session string state
+		Lobby validPlayingLobby = new Lobby();
+		validPlayingLobby.setId(10L);
+		validPlayingLobby.setSessionId("PLAY-123");
+		validPlayingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+
+		Lobby nullSessionWaitingLobby = new Lobby();
+		nullSessionWaitingLobby.setId(20L);
+		nullSessionWaitingLobby.setSessionId(null); // Hits the sessionId == null check
+		nullSessionWaitingLobby.setPlayerIds(new ArrayList<>(List.of(2L)));
+
+		Lobby blankSessionWaitingLobby = new Lobby();
+		blankSessionWaitingLobby.setId(30L);
+		blankSessionWaitingLobby.setSessionId("   "); // Hits the sessionId.isBlank() check
+		blankSessionWaitingLobby.setPlayerIds(new ArrayList<>(List.of(3L)));
+
+		// Define what the repositories return when the private helpers query them
+		Mockito.when(lobbyRepository.findByStatus("PLAYING"))
+			   .thenReturn(List.of(validPlayingLobby));
+		Mockito.when(lobbyRepository.findByStatus("WAITING"))
+			   .thenReturn(List.of(nullSessionWaitingLobby, blankSessionWaitingLobby));
+
+		// Create a list with valid users, a user with no lobby (4L), and a null to hit every filter branch
+		List<Long> inputIds = new ArrayList<>(List.of(1L, 2L, 3L, 4L));
+		inputIds.add(null); 
+
+		// 2. Action
+		Map<Long, String> result = lobbyService.resolveJoinableSessionIdsForUsers(inputIds);
+
+		// 3. Assertion
+		assertEquals(1, result.size());
+		assertEquals("PLAY-123", result.get(1L)); // User 1 successfully got their session
+		assertFalse(result.containsKey(2L));      // Filtered out because session was null
+		assertFalse(result.containsKey(3L));      // Filtered out because session was blank
+		assertFalse(result.containsKey(4L));      // Filtered out because they had no lobby
+	}
+
+	@Test
+	public void resolveJoinableSessionIdForUser_nullId_returnsNull() {
+		// 1. Action & Assertion
+		assertNull(lobbyService.resolveJoinableSessionIdForUser(null));
+		
+		// Verify we didn't touch the repository if the ID was null
+		Mockito.verify(lobbyRepository, Mockito.never()).findByStatus(Mockito.anyString());
+	}
+
+	@Test
+	public void resolveJoinableSessionIdForUser_userNotInLobby_returnsNull() {
+		// 1. Setup: User is not in any active lobbies
+		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of());
+		Mockito.when(lobbyRepository.findByStatus("WAITING")).thenReturn(List.of());
+
+		// 2. Action
+		String result = lobbyService.resolveJoinableSessionIdForUser(1L);
+
+		// 3. Assertion: The plural method returns an empty map, so .get(1L) yields null
+		assertNull(result);
+	}
+
+	@Test
+	public void resolveJoinableSessionIdForUser_userInLobby_returnsSessionId() {
+		// 1. Setup: User 1 is actively in a lobby
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("MY-SESSION-123");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+
+		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of(lobby));
+		Mockito.when(lobbyRepository.findByStatus("WAITING")).thenReturn(List.of());
+
+		// 2. Action
+		String result = lobbyService.resolveJoinableSessionIdForUser(1L);
+
+		// 3. Assertion: It successfully navigated the map and extracted the correct string
+		assertEquals("MY-SESSION-123", result);
+	}
+
+	@Test
+	public void resolveLobbyPresenceStatusForUsers_emptyOrNullInput_returnsEmptyMap() {
+		// Tests null input
+		assertTrue(lobbyService.resolveLobbyPresenceStatusForUsers(null).isEmpty());
+		
+		// Tests empty list
+		assertTrue(lobbyService.resolveLobbyPresenceStatusForUsers(List.of()).isEmpty());
+
+		// Tests a list that contains only null values
+		List<Long> listWithNulls = new ArrayList<>();
+		listWithNulls.add(null);
+		assertTrue(lobbyService.resolveLobbyPresenceStatusForUsers(listWithNulls).isEmpty());
+	}
+
+	@Test
+	public void resolveLobbyPresenceStatusForUsers_evaluatesAllPlayerAndSpectatorRoles() {
+		// 1. Setup: Create a PLAYING lobby with a Player (1L) and a Spectator (2L)
+		Lobby playingLobby = new Lobby();
+		playingLobby.setId(10L);
+		playingLobby.setStatus("PLAYING");
+		playingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		playingLobby.setSpectatorIds(new ArrayList<>(List.of(2L)));
+
+		// 2. Setup: Create a WAITING lobby with a Player (3L) and a Spectator (4L)
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setId(20L);
+		waitingLobby.setStatus("WAITING");
+		waitingLobby.setPlayerIds(new ArrayList<>(List.of(3L)));
+		waitingLobby.setSpectatorIds(new ArrayList<>(List.of(4L)));
+
+		// Mock the repository responses
+		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of(playingLobby));
+		Mockito.when(lobbyRepository.findByStatus("WAITING")).thenReturn(List.of(waitingLobby));
+
+		// Ask the service to resolve statuses for all 4 users, plus a user (5L) who isn't in any lobby
+		List<Long> inputIds = List.of(1L, 2L, 3L, 4L, 5L);
+
+		// 3. Action
+		Map<Long, UserStatus> result = lobbyService.resolveLobbyPresenceStatusForUsers(inputIds);
+
+		// 4. Assertion: Verify every branch assigned the correct enum
+		assertEquals(4, result.size());
+		assertEquals(UserStatus.PLAYING, result.get(1L));       // Player in a PLAYING lobby
+		assertEquals(UserStatus.SPECTATING, result.get(2L));    // Spectator in a PLAYING lobby
+		assertEquals(UserStatus.LOBBY, result.get(3L));         // Player in a WAITING lobby
+		assertEquals(UserStatus.SPECTATING, result.get(4L));    // Spectator in a WAITING lobby
+		
+		assertFalse(result.containsKey(5L)); // User 5 is completely ignored
+	}
+
+	@Test
+	public void resolveLobbyPresenceStatusForUser_nullId_returnsNull() {
+		// 1. Action & Assertion
+		assertNull(lobbyService.resolveLobbyPresenceStatusForUser(null));
+		
+		// Verify early exit protected the repository
+		Mockito.verify(lobbyRepository, Mockito.never()).findByStatus(Mockito.anyString());
+	}
+
+	@Test
+	public void resolveLobbyPresenceStatusForUser_userNotInLobby_returnsNull() {
+		// 1. Setup: User is not in any active lobbies
+		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of());
+		Mockito.when(lobbyRepository.findByStatus("WAITING")).thenReturn(List.of());
+
+		// 2. Action
+		UserStatus result = lobbyService.resolveLobbyPresenceStatusForUser(1L);
+
+		// 3. Assertion: The plural method returns an empty map, so .get(1L) yields null
+		assertNull(result);
+	}
+
+	@Test
+	public void resolveLobbyPresenceStatusForUser_userInLobby_returnsStatus() {
+		// 1. Setup: User 1 is actively playing in a lobby
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setStatus("PLAYING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+
+		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of(lobby));
+		Mockito.when(lobbyRepository.findByStatus("WAITING")).thenReturn(List.of());
+
+		// 2. Action
+		UserStatus result = lobbyService.resolveLobbyPresenceStatusForUser(1L);
+
+		// 3. Assertion: It successfully navigated the map and extracted the correct enum
+		assertEquals(UserStatus.PLAYING, result);
+	}
+
+	@Test
+	public void createLobby_isPublicNull_defaultsToTrue() {
+		// 1. Setup
+		User creator = new User();
+		creator.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(creator);
+		Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(creator)); // Needed for setUserStatus
+		
+		Mockito.when(lobbyRepository.findBySessionHostUserId(2L)).thenReturn(new ArrayList<>());
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// 2. Action: Pass null for isPublic
+		Lobby result = lobbyService.createLobby("token", null);
+
+		// 3. Assertion: It should default to true
+		assertTrue(result.getIsPublic());
+		assertEquals(UserStatus.LOBBY, creator.getStatus()); // Verify status was updated
+	}
+
+	@Test
+	public void createLobby_isPublicFalse_createsPrivateLobby() {
+		// 1. Setup
+		User creator = new User();
+		creator.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(creator);
+		Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(creator));
+		
+		Mockito.when(lobbyRepository.findBySessionHostUserId(2L)).thenReturn(new ArrayList<>());
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// 2. Action: Pass false for isPublic
+		Lobby result = lobbyService.createLobby("token", false);
+
+		// 3. Assertion: It should respect the false value
+		assertFalse(result.getIsPublic());
+	}
+
+	@Test
+	public void createLobby_hostAlreadyHasWaitingLobby_throwsConflict() {
+		// 1. Setup
+		User creator = new User();
+		creator.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(creator);
+		
+		// Setup a mock lobby that the host is already waiting in
+		Lobby existingWaitingLobby = new Lobby();
+		existingWaitingLobby.setStatus("WAITING");
+		
+		Mockito.when(lobbyRepository.findBySessionHostUserId(2L))
+			   .thenReturn(List.of(existingWaitingLobby));
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.createLobby("token", true));
+
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("already have an active lobby"));
+		
+		// Verify we never attempted to save a new lobby
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void findWaitingLobbyForHost_noLobbies_returnsEmpty() {
+		// 1. Setup: Repository returns an empty list for this host
+		Mockito.when(lobbyRepository.findBySessionHostUserId(1L))
+			   .thenReturn(List.of());
+
+		// 2. Action
+		Optional<Lobby> result = lobbyService.findWaitingLobbyForHost(1L);
+
+		// 3. Assertion: The stream is empty, so it returns Optional.empty()
+		assertTrue(result.isEmpty());
+	}
+
+	@Test
+	public void findWaitingLobbyForHost_noWaitingLobbies_returnsEmpty() {
+		// 1. Setup: Host has lobbies, but none of them are WAITING
+		Lobby playingLobby = new Lobby();
+		playingLobby.setStatus("PLAYING");
+		
+		Lobby endedLobby = new Lobby();
+		endedLobby.setStatus("ENDED");
+
+		Mockito.when(lobbyRepository.findBySessionHostUserId(1L))
+			   .thenReturn(List.of(playingLobby, endedLobby));
+
+		// 2. Action
+		Optional<Lobby> result = lobbyService.findWaitingLobbyForHost(1L);
+
+		// 3. Assertion: The filter successfully blocks the non-waiting lobbies
+		assertTrue(result.isEmpty());
+	}
+
+	@Test
+	public void findWaitingLobbyForHost_hasWaitingLobby_returnsFirstMatch() {
+		// 1. Setup: Host has a mix of lobbies, including multiple WAITING ones
+		Lobby playingLobby = new Lobby();
+		playingLobby.setStatus("PLAYING");
+		
+		Lobby targetWaitingLobby = new Lobby();
+		targetWaitingLobby.setId(10L);
+		targetWaitingLobby.setStatus("WAITING");
+
+		Lobby secondWaitingLobby = new Lobby();
+		secondWaitingLobby.setId(20L);
+		secondWaitingLobby.setStatus("WAITING");
+
+		// Note: The list order matters to test findFirst()
+		Mockito.when(lobbyRepository.findBySessionHostUserId(1L))
+			   .thenReturn(List.of(playingLobby, targetWaitingLobby, secondWaitingLobby));
+
+		// 2. Action
+		Optional<Lobby> result = lobbyService.findWaitingLobbyForHost(1L);
+
+		// 3. Assertion: It should skip PLAYING, find the first WAITING lobby (ID 10), and stop
+		assertTrue(result.isPresent());
+		assertEquals(10L, result.get().getId());
+	}
+
+	@Test
+	public void requireWaitingLobbyForHost_lobbyExists_returnsLobby() {
+		// 1. Setup: Host has a WAITING lobby (simulating Optional.isPresent)
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setId(10L);
+		waitingLobby.setStatus("WAITING");
+		
+		Mockito.when(lobbyRepository.findBySessionHostUserId(1L))
+			   .thenReturn(List.of(waitingLobby));
+
+		// 2. Action
+		Lobby result = lobbyService.requireWaitingLobbyForHost(1L);
+
+		// 3. Assertion: It successfully extracted and returned the lobby
+		assertNotNull(result);
+		assertEquals(10L, result.getId());
+	}
+
+	@Test
+	public void requireWaitingLobbyForHost_noLobbyExists_throwsConflict() {
+		// 1. Setup: Host has NO waiting lobbies (simulating Optional.empty)
+		Mockito.when(lobbyRepository.findBySessionHostUserId(1L))
+			   .thenReturn(List.of());
+
+		// 2. Action & 3. Assertion: It throws the expected exception
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.requireWaitingLobbyForHost(1L));
+
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Create a lobby first"));
+	}
+
+	@Test
+	public void isLobbyWaiting_nullId_returnsFalse() {
+		// 1. Action & Assertion
+		assertFalse(lobbyService.isLobbyWaiting(null));
+
+		// 2. Verify the repository was completely protected by the early exit
+		Mockito.verify(lobbyRepository, Mockito.never()).findById(Mockito.anyLong());
+	}
+
+	@Test
+	public void isLobbyWaiting_lobbyNotFound_returnsFalse() {
+		// 1. Setup: Repository returns empty Optional
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.empty());
+
+		// 2. Action & 3. Assertion: It should gracefully hit the .orElse(false)
+		assertFalse(lobbyService.isLobbyWaiting(1L));
+	}
+
+	@Test
+	public void isLobbyWaiting_lobbyStatusNotWaiting_returnsFalse() {
+		// 1. Setup: Lobby exists, but is currently PLAYING
+		Lobby playingLobby = new Lobby();
+		playingLobby.setId(1L);
+		playingLobby.setStatus("PLAYING");
+
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(playingLobby));
+
+		// 2. Action & 3. Assertion
+		assertFalse(lobbyService.isLobbyWaiting(1L));
+	}
+
+	@Test
+	public void isLobbyWaiting_lobbyStatusIsWaiting_returnsTrue() {
+		// 1. Setup: Lobby exists and is actively WAITING
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setId(1L);
+		waitingLobby.setStatus("WAITING");
+
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(waitingLobby));
+
+		// 2. Action & 3. Assertion
+		assertTrue(lobbyService.isLobbyWaiting(1L));
+	}
+
+	@Test
+	public void addPlayerToLobby_lobbyNotFound_returnsEarly() {
+		// 1. Setup
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.empty());
+
+		// 2. Action
+		lobbyService.addPlayerToLobby(1L, 1L, 2L);
+
+		// 3. Assertion: Never reaches the save method
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void addPlayerToLobby_wrongHost_returnsEarly() {
+		// 1. Setup: Real host is 99L, but 1L was provided
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(99L);
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(lobby));
+
+		// 2. Action
+		lobbyService.addPlayerToLobby(1L, 1L, 2L); 
+
+		// 3. Assertion
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void addPlayerToLobby_notWaiting_returnsEarly() {
+		// 1. Setup: Lobby is already PLAYING
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("PLAYING");
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(lobby));
+
+		// 2. Action
+		lobbyService.addPlayerToLobby(1L, 1L, 2L);
+
+		// 3. Assertion
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void addPlayerToLobby_lobbyFull_returnsEarly() {
+		// 1. Setup: Lobby already has 4 players
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 3L, 4L, 5L))); 
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(lobby));
+
+		// 2. Action
+		lobbyService.addPlayerToLobby(1L, 1L, 2L);
+
+		// 3. Assertion
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void addPlayerToLobby_guestInActiveGame_throwsConflict() {
+		// 1. Setup: Valid lobby
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(lobby));
+
+		// Mock isUserInActiveGame to return true for the guest (2L)
+		Game activeGame = new Game();
+		activeGame.setStatus(GameStatus.ROUND_ACTIVE);
+		activeGame.setOrderedPlayerIds(new ArrayList<>(List.of(2L)));
+		Mockito.when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 2L)).thenReturn(true);
+		Mockito.when(gameRepository.findGamesByPlayerId(2L)).thenReturn(List.of(activeGame));
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.addPlayerToLobby(1L, 1L, 2L));
+
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void addPlayerToLobby_alreadyInLobby_skipsSaveAndReturns() {
+		// 1. Setup: Guest (2L) is already inside the playerIds list
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L))); 
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(lobby));
+
+		// 2. Action
+		lobbyService.addPlayerToLobby(1L, 1L, 2L);
+
+		// 3. Assertion: This covers the final "uncovered" closing brace! It should skip the entire save block.
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void addPlayerToLobby_validGuest_clearsListsAndSaves() {
+		// 1. Setup: Perfect lobby, but the guest was previously kicked and is currently spectating
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("SESSION-123");
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		
+		// Fill the lists with the guest (2L) to trigger the cleanup branches
+		lobby.setKickedUserIds(new ArrayList<>(List.of(2L)));
+		lobby.setSpectatorIds(new ArrayList<>(List.of(2L)));
+		
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(lobby));
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// Provide a valid User for the status update
+		User guestUser = new User();
+		guestUser.setId(2L);
+		guestUser.setStatus(UserStatus.ONLINE);
+		Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(guestUser));
+
+		// 2. Action
+		lobbyService.addPlayerToLobby(1L, 1L, 2L);
+
+		// 3. Assertions
+		assertTrue(lobby.getPlayerIds().contains(2L));            // Successfully added
+		assertFalse(lobby.getKickedUserIds().contains(2L));       // Successfully forgiven/removed
+		assertFalse(lobby.getSpectatorIds().contains(2L));        // Successfully promoted from spectator
+		assertEquals(UserStatus.LOBBY, guestUser.getStatus());    // Status updated
+
+		Mockito.verify(lobbyRepository).save(lobby);
+		Mockito.verify(lobbyEventPublisher).broadcastLobbyUpdate(10L, lobby);
+		Mockito.verify(onlineUsersEventPublisher).broadcastOnlineUsers();
+	}
+
+	@Test
+	public void getWaitingSessionIdIfPlayerInLobby_lobbyNotFound_returnsNull() {
+		// 1. Setup: Repository returns empty
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.empty());
+
+		// 2. Action
+		String result = lobbyService.getWaitingSessionIdIfPlayerInLobby(1L, 2L);
+
+		// 3. Assertion: Stream instantly hits .orElse(null)
+		assertNull(result);
+	}
+
+	@Test
+	public void getWaitingSessionIdIfPlayerInLobby_statusNotWaiting_returnsNull() {
+		// 1. Setup: Lobby exists and guest (2L) is in it, but status is wrong
+		Lobby playingLobby = new Lobby();
+		playingLobby.setStatus("PLAYING");
+		playingLobby.setPlayerIds(new ArrayList<>(List.of(2L)));
+
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(playingLobby));
+
+		// 2. Action
+		String result = lobbyService.getWaitingSessionIdIfPlayerInLobby(1L, 2L);
+
+		// 3. Assertion: Filter fails on the first condition
+		assertNull(result);
+	}
+
+	@Test
+	public void getWaitingSessionIdIfPlayerInLobby_userNotInLobby_returnsNull() {
+		// 1. Setup: Lobby exists and is waiting, but guest (2L) is missing
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setStatus("WAITING");
+		waitingLobby.setPlayerIds(new ArrayList<>(List.of(3L, 4L))); 
+
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(waitingLobby));
+
+		// 2. Action
+		String result = lobbyService.getWaitingSessionIdIfPlayerInLobby(1L, 2L);
+
+		// 3. Assertion: Filter fails on the second condition
+		assertNull(result);
+	}
+
+	@Test
+	public void getWaitingSessionIdIfPlayerInLobby_validWaitingLobbyWithUser_returnsSessionId() {
+		// 1. Setup: Perfect match
+		Lobby validLobby = new Lobby();
+		validLobby.setSessionId("EXPECTED-SESSION-ID");
+		validLobby.setStatus("WAITING");
+		validLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+
+		Mockito.when(lobbyRepository.findById(1L)).thenReturn(Optional.of(validLobby));
+
+		// 2. Action
+		String result = lobbyService.getWaitingSessionIdIfPlayerInLobby(1L, 2L);
+
+		// 3. Assertion: Stream successfully maps the session string
+		assertEquals("EXPECTED-SESSION-ID", result);
+	}
+
+	@Test
+	public void getMyWaitingLobbyAsHost_invalidToken_throwsUnauthorized() {
+		// 1. Setup: Invalid token returns null user
+		Mockito.when(userRepository.findByToken("bad-token")).thenReturn(null);
+
+		// 2. Action & 3. Assertion: The private getUserByToken helper throws a 401
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class, 
+				() -> lobbyService.getMyWaitingLobbyAsHost("bad-token"));
+		
+		assertEquals(HttpStatus.UNAUTHORIZED, ex.getStatusCode());
+	}
+
+	@Test
+	public void getMyWaitingLobbyAsHost_foundAsParticipant_returnsMaxIdLobby() {
+		// 1. Setup: Valid user
+		User user = new User();
+		user.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+
+		// Create lobbies to test the max() comparator (Removed the null ID lobby)
+		Lobby olderLobby = new Lobby();
+		olderLobby.setId(10L);
+		
+		Lobby newerLobby = new Lobby();
+		newerLobby.setId(50L);
+
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
+			   .thenReturn(List.of(olderLobby, newerLobby));
+
+		// 2. Action
+		Lobby result = lobbyService.getMyWaitingLobbyAsHost("token");
+
+		// 3. Assertion: It correctly grabs the one with the highest ID (50L)
+		assertEquals(50L, result.getId());
+	}
+	
+	@Test
+	public void getMyWaitingLobbyAsHost_notFoundAsParticipant_foundAsHost_returnsLobby() {
+		// 1. Setup: Valid user
+		User user = new User();
+		user.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+
+		// Fails the first check
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
+			   .thenReturn(List.of());
+
+		// Create lobbies for the fallback check (host check)
+		Lobby playingLobby = new Lobby();
+		playingLobby.setId(20L);
+		playingLobby.setStatus("PLAYING"); // Should be filtered out
+
+		Lobby hostWaitingLobby = new Lobby();
+		hostWaitingLobby.setId(30L);
+		hostWaitingLobby.setStatus("WAITING"); // The target
+
+		Mockito.when(lobbyRepository.findBySessionHostUserId(1L))
+			   .thenReturn(List.of(playingLobby, hostWaitingLobby));
+
+		// 2. Action
+		Lobby result = lobbyService.getMyWaitingLobbyAsHost("token");
+
+		// 3. Assertion: It successfully fell back and filtered out the PLAYING lobby
+		assertEquals(30L, result.getId());
+	}
+
+	@Test
+	public void getMyWaitingLobbyAsHost_noWaitingLobbies_throwsNotFound() {
+		// 1. Setup: Valid user
+		User user = new User();
+		user.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+
+		// Fails both checks
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
+			   .thenReturn(List.of());
+		Mockito.when(lobbyRepository.findBySessionHostUserId(1L))
+			   .thenReturn(List.of());
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class, 
+				() -> lobbyService.getMyWaitingLobbyAsHost("token"));
+		
+		assertEquals(HttpStatus.NOT_FOUND, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("No waiting lobby"));
+	}
+
+	@Test
+	public void getWaitingLobbyView_notPlayerNotSpectator_throwsForbidden() {
+		// 1. Setup: A complete stranger tries to view the lobby
+		User stranger = new User();
+		stranger.setId(99L);
+		Mockito.when(userRepository.findByToken("stranger-token")).thenReturn(stranger);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L))); // Stranger is not a player
+		lobby.setSpectatorIds(new ArrayList<>(List.of(2L))); // Stranger is not a spectator
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion: Hits the "if (!isPlayer && !isSpectator)" block
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.getWaitingLobbyView("stranger-token", "S1"));
+		
+		assertEquals(HttpStatus.FORBIDDEN, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Not part of this lobby"));
+	}
+
+	@Test
+	public void getWaitingLobbyView_assignedColorsDiffer_savesAndUsesPersistedLobby() {
+		// 1. Setup: Host exists, but the lobby is missing its assigned colors map
+		User host = new User();
+		host.setId(1L);
+		host.setPreferredColorPriority(new ArrayList<>(List.of("navy_blue")));
+		
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+		Mockito.when(userRepository.findAllById(Mockito.any())).thenReturn(List.of(host));
+
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setSessionHostUserId(1L);
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		// Force the map to be null so the method has to compute and save new colors
+		lobby.setAssignedCharacterColorByUserId(null); 
+
+		Lobby persistedLobby = new Lobby();
+		persistedLobby.setId(10L);
+		persistedLobby.setSessionId("S1");
+		persistedLobby.setSessionHostUserId(1L);
+		persistedLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		persistedLobby.setAssignedCharacterColorByUserId(Map.of(1L, "navy_blue"));
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		// Mock the repository to return our persistedLobby, hitting the 'if (persistedLobby != null)' branch
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenReturn(persistedLobby);
+
+		// 2. Action
+		WaitingLobbyViewDTO dto = lobbyService.getWaitingLobbyView("token", "S1");
+
+		// 3. Assertion: The colors were successfully mapped, saved, and retrieved
+		assertEquals(1, dto.getPlayers().size());
+		assertEquals("navy_blue", dto.getPlayers().get(0).getCharacterColorId());
+	}
+
+	@Test
+	public void getWaitingLobbyView_playerReadyMapIsNull_handlesSafely() {
+		// 1. Setup: A spectator views an empty lobby (meaning normalizeLobbyPlayerState might skip initializing the map)
+		User spectator = new User();
+		spectator.setId(2L);
+		
+		Mockito.when(userRepository.findByToken("token")).thenReturn(spectator);
+		Mockito.when(userRepository.findAllById(Mockito.any())).thenReturn(List.of(spectator));
+
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setPlayerIds(new ArrayList<>()); // No players
+		lobby.setSpectatorIds(new ArrayList<>(List.of(2L))); // Spectator allows access
+		lobby.setPlayerReadyByUserId(null); // Explicitly null to hit the ternary fallback
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// 2. Action
+		WaitingLobbyViewDTO dto = lobbyService.getWaitingLobbyView("token", "S1");
+
+		// 3. Assertion: Method executes safely without throwing a NullPointerException
+		assertTrue(dto.getPlayers().isEmpty());
+		assertEquals(1, dto.getSpectators().size());
+	}
+
+	@Test
+	public void setPlayerReady_readyIsNull_throwsBadRequest() {
+		// 1. Action & 2. Assertion: Fails on the very first line
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.setPlayerReady("S1", "token", null));
+		
+		assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Missing ready state"));
+	}
+
+	@Test
+	public void setPlayerReady_lobbyNotFound_throwsNotFound() {
+		// 1. Setup
+		User user = new User();
+		user.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(null);
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.setPlayerReady("S1", "token", true));
+		
+		assertEquals(HttpStatus.NOT_FOUND, ex.getStatusCode());
+	}
+
+	@Test
+	public void setPlayerReady_lobbyNotWaiting_throwsConflict() {
+		// 1. Setup: Lobby is active
+		User user = new User();
+		user.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+		
+		Lobby lobby = new Lobby();
+		lobby.setStatus("PLAYING");
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.setPlayerReady("S1", "token", true));
+		
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+	}
+
+	@Test
+	public void setPlayerReady_userNotPlayer_throwsForbidden() {
+		// 1. Setup: User is trying to ready up, but they aren't in the player list
+		User stranger = new User();
+		stranger.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(stranger);
+		
+		Lobby lobby = new Lobby();
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L))); // Missing 2L
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.setPlayerReady("S1", "token", true));
+		
+		assertEquals(HttpStatus.FORBIDDEN, ex.getStatusCode());
+	}
+
+	@Test
+	public void setPlayerReady_userIsHost_skipsSaveAndReturnsView() {
+		// 1. Setup: Host toggles ready state
+		User host = new User();
+		host.setId(1L);
+		host.setUsername("HostUser");
+		
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+		Mockito.when(userRepository.findAllById(Mockito.anyIterable())).thenReturn(List.of(host));
+		
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setStatus("WAITING");
+		lobby.setSessionHostUserId(1L);
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		// Allow any side-effect saves that might be triggered by view normalization
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// 2. Action
+		WaitingLobbyViewDTO result = lobbyService.setPlayerReady("S1", "token", true);
+
+		// 3. Assertion: Verify the view DTO was returned successfully
+		assertNotNull(result);
+		
+		// Verify that the regular player broadcast block was completely bypassed
+		Mockito.verify(lobbyEventPublisher, Mockito.never())
+               .broadcastLobbyUpdate(Mockito.anyLong(), Mockito.any());
+	}
+
+	@Test
+	public void setPlayerReady_playerReadyMapIsNull_createsMapAndSaves() {
+		// 1. Setup: Guest toggles state on a fresh lobby with no ready-map
+		User host = new User();
+		host.setId(1L);
+		
+		User guest = new User();
+		guest.setId(2L);
+		guest.setUsername("GuestUser");
+		
+		Mockito.when(userRepository.findByToken("token")).thenReturn(guest);
+		Mockito.when(userRepository.findAllById(Mockito.anyIterable())).thenReturn(List.of(host, guest));
+		
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setStatus("WAITING");
+		lobby.setSessionHostUserId(1L);
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+		lobby.setPlayerReadyByUserId(null); 
+		
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// 2. Action
+		WaitingLobbyViewDTO result = lobbyService.setPlayerReady("S1", "token", true);
+
+		// 3. Assertion: It created the map, updated it, and saved at least once
+		assertNotNull(result);
+		assertTrue(lobby.getPlayerReadyByUserId().get(2L));
+		Mockito.verify(lobbyRepository, Mockito.atLeastOnce()).save(lobby);
+		Mockito.verify(lobbyEventPublisher).broadcastLobbyUpdate(10L, lobby);
+	}
+
+	@Test
+	public void setPlayerReady_playerReadyMapExists_updatesMapAndSaves() {
+		// 1. Setup: Guest updates their existing ready state
+		User host = new User();
+		host.setId(1L);
+		
+		User guest = new User();
+		guest.setId(2L);
+		guest.setUsername("GuestUser");
+		
+		Mockito.when(userRepository.findByToken("token")).thenReturn(guest);
+		Mockito.when(userRepository.findAllById(Mockito.anyIterable())).thenReturn(List.of(host, guest));
+		
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setStatus("WAITING");
+		lobby.setSessionHostUserId(1L);
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+		
+		Map<Long, Boolean> existingMap = new HashMap<>();
+		existingMap.put(2L, false); 
+		lobby.setPlayerReadyByUserId(existingMap);
+		
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// 2. Action: Set to true
+		WaitingLobbyViewDTO result = lobbyService.setPlayerReady("S1", "token", true);
+
+		// 3. Assertion: The map was mutated and saved at least once
+		assertNotNull(result);
+		assertTrue(lobby.getPlayerReadyByUserId().get(2L)); 
+		Mockito.verify(lobbyRepository, Mockito.atLeastOnce()).save(lobby);
+		Mockito.verify(lobbyEventPublisher).broadcastLobbyUpdate(10L, lobby);
+	}
+
+	@Test
+	public void updateLobbySettings_bodyIsNull_throwsBadRequest() {
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.updateLobbySettings("token", "S1", null));
+		
+		assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("No settings to update"));
+	}
+
+	@Test
+	public void updateLobbySettings_bodyHasNoSettings_throwsBadRequest() {
+		// 1. Setup: DTO is completely empty
+		LobbySettingsPatchDTO emptyBody = new LobbySettingsPatchDTO();
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.updateLobbySettings("token", "S1", emptyBody));
+		
+		assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+	}
+
+	@Test
+	public void updateLobbySettings_lobbyNotFound_throwsNotFound() {
+		// 1. Setup
+		User user = new User();
+		user.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(null);
+
+		LobbySettingsPatchDTO body = new LobbySettingsPatchDTO();
+		body.setIsPublic(false);
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.updateLobbySettings("token", "S1", body));
+		
+		assertEquals(HttpStatus.NOT_FOUND, ex.getStatusCode());
+	}
+
+	@Test
+	public void updateLobbySettings_lobbyNotWaiting_throwsConflict() {
+		// 1. Setup
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("PLAYING"); // Not WAITING
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		LobbySettingsPatchDTO body = new LobbySettingsPatchDTO();
+		body.setIsPublic(false);
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.updateLobbySettings("token", "S1", body));
+		
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Invalid lobby settings update"));
+	}
+
+	@Test
+	public void updateLobbySettings_updatesAllTimers_clampsToMinimums() {
+		// 1. Setup: Mock the absent round points which aren't in the global setup
+		Mockito.when(lobbySettingsProperties.getAbsentRoundPointsMin()).thenReturn(0L);
+		Mockito.when(lobbySettingsProperties.getAbsentRoundPointsMax()).thenReturn(50L);
+		Mockito.when(lobbySettingsProperties.getAbsentRoundPointsDefault()).thenReturn(10L);
+
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// 2. Setup DTO with values WAY below the minimums
+		LobbySettingsPatchDTO body = new LobbySettingsPatchDTO();
+		body.setAfkTimeoutSeconds(0L);
+		body.setInitialPeekSeconds(0L);
+		body.setTurnSeconds(0L);
+		body.setAbilityRevealSeconds(0L);
+		body.setAbilitySwapSeconds(0L);
+		body.setAbsentRoundPoints(-10L);
+		body.setWebsocketGraceSeconds(0L);
+		body.setChatCooldownSeconds(0L);
+
+		// 3. Action
+		Lobby updated = lobbyService.updateLobbySettings("token", "S1", body);
+
+		// 4. Assertion: Verify everything was clamped up to its minimum limit
+		assertEquals(180L, updated.getAfkTimeoutSeconds());
+		assertEquals(3L, updated.getInitialPeekSeconds());
+		assertEquals(10L, updated.getTurnSeconds());
+		assertEquals(3L, updated.getAbilityRevealSeconds());
+		assertEquals(5L, updated.getAbilitySwapSeconds());
+		assertEquals(0L, updated.getAbsentRoundPoints());
+		assertEquals(180L, updated.getWebsocketGraceSeconds());
+		assertEquals(1L, updated.getChatCooldownSeconds());
+		
+		Mockito.verify(lobbyEventPublisher).broadcastLobbyUpdate(10L, updated);
+	}
+
+	@Test
+	public void updateLobbySettings_updatesAllTimers_clampsToMaximums() {
+		// 1. Setup: Mock the absent round points
+		Mockito.when(lobbySettingsProperties.getAbsentRoundPointsMin()).thenReturn(0L);
+		Mockito.when(lobbySettingsProperties.getAbsentRoundPointsMax()).thenReturn(50L);
+		Mockito.when(lobbySettingsProperties.getAbsentRoundPointsDefault()).thenReturn(10L);
+
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(inv -> inv.getArgument(0));
+
+		// 2. Setup DTO with values WAY above the maximums
+		LobbySettingsPatchDTO body = new LobbySettingsPatchDTO();
+		body.setAfkTimeoutSeconds(9999L);
+		body.setInitialPeekSeconds(9999L);
+		body.setTurnSeconds(9999L);
+		body.setAbilityRevealSeconds(9999L);
+		body.setAbilitySwapSeconds(9999L);
+		body.setAbsentRoundPoints(9999L);
+		body.setWebsocketGraceSeconds(9999L);
+		body.setChatCooldownSeconds(9999L);
+
+		// 3. Action
+		Lobby updated = lobbyService.updateLobbySettings("token", "S1", body);
+
+		// 4. Assertion: Verify everything was clamped down to its maximum limit
+		assertEquals(1200L, updated.getAfkTimeoutSeconds());
+		assertEquals(60L, updated.getInitialPeekSeconds());
+		assertEquals(60L, updated.getTurnSeconds());
+		assertEquals(10L, updated.getAbilityRevealSeconds());
+		assertEquals(30L, updated.getAbilitySwapSeconds());
+		assertEquals(50L, updated.getAbsentRoundPoints());
+		assertEquals(600L, updated.getWebsocketGraceSeconds());
+		assertEquals(60L, updated.getChatCooldownSeconds());
+	}
+
+	@Test
+	public void joinLobby_lobbyNotWaiting_throwsConflict() {
+		// 1. Setup: Valid user
+		User joiner = new User();
+		joiner.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(joiner);
+
+		// Lobby is active (PLAYING) instead of WAITING
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setStatus("PLAYING"); 
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion: Hits the status check exception
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.joinLobby("S1", "token"));
+
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Lobby is not in waiting state"));
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void joinLobby_alreadyInLobby_throwsConflict() {
+		// 1. Setup: User is already listed in the lobby's player list
+		User joiner = new User();
+		joiner.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(joiner);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L))); // User 2L is already here
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion: Hits the duplicate player check exception
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.joinLobby("S1", "token"));
+
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Already in lobby"));
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void joinLobby_userWasKicked_throwsForbidden() {
+		// 1. Setup: User belongs to the kicked list
+		User joiner = new User();
+		joiner.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(joiner);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		// Populating the list ensures we satisfy both "getKickedUserIds() != null" and ".contains(user.getId())"
+		lobby.setKickedUserIds(new ArrayList<>(List.of(2L))); 
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion: Hits the ban validation check exception
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.joinLobby("S1", "token"));
+
+		assertEquals(HttpStatus.FORBIDDEN, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("You were kicked from this lobby"));
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void joinLobbyAsSpectator_lobbyStatusInvalid_throwsConflict() {
+		// 1. Setup: User is valid
+		User user = new User();
+		user.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+
+		// Lobby has an invalid status (e.g., ENDED)
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setStatus("ENDED"); 
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion: Hits the status check exception
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.joinLobbyAsSpectator("S1", "token"));
+
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Lobby is not joinable as spectator"));
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void joinLobbyAsSpectator_userWasKicked_throwsForbidden() {
+		// 1. Setup
+		User user = new User();
+		user.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setStatus("WAITING");
+		lobby.setKickedUserIds(new ArrayList<>(List.of(2L))); // User 2L is banned
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.joinLobbyAsSpectator("S1", "token"));
+
+		assertEquals(HttpStatus.FORBIDDEN, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("You were kicked from this lobby"));
+	}
+
+	@Test
+	public void joinLobbyAsSpectator_userIsAlreadyPlayer_throwsConflict() {
+		// 1. Setup: A user attempts to spectate a lobby they are actively playing in
+		User user = new User();
+		user.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setStatus("PLAYING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L))); // Already a player
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.joinLobbyAsSpectator("S1", "token"));
+
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Already a player in this lobby"));
+	}
+
+	@Test
+	public void joinLobbyAsSpectator_userInActiveGameElsewhere_throwsConflict() {
+		// 1. Setup
+		User user = new User();
+		user.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionId("S1");
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// Mock active game check to return true for user 2L
+		Game activeGame = new Game();
+		activeGame.setStatus(GameStatus.ROUND_ACTIVE);
+		activeGame.setOrderedPlayerIds(new ArrayList<>(List.of(2L)));
+		Mockito.when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 2L)).thenReturn(true);
+		Mockito.when(gameRepository.findGamesByPlayerId(2L)).thenReturn(List.of(activeGame));
+
+		// 2. Action & 3. Assertion
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.joinLobbyAsSpectator("S1", "token"));
+
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Cannot spectate during an active game"));
+	}
+
+	@Test
+	public void joinLobbyAsSpectator_alreadySpectator_rebroadcastsAndReturns() {
+		// 1. Setup: User is already inside the spectator list
+		User user = new User();
+		user.setId(2L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(user);
+
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		lobby.setSpectatorIds(new ArrayList<>(List.of(2L))); // Already spectating
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		// 2. Action
+		Lobby result = lobbyService.joinLobbyAsSpectator("S1", "token");
+
+		// 3. Assertion: Bypasses mutation steps, broadcasts current state, and returns early
+		assertNotNull(result);
+		assertEquals(10L, result.getId());
+		Mockito.verify(lobbyEventPublisher).broadcastLobbyUpdate(10L, lobby);
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void verifyLobbyCanStart_lobbyNotFound_throwsNotFound() {
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(null);
+
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.verifyLobbyCanStart("token", "S1"));
+		assertEquals(HttpStatus.NOT_FOUND, ex.getStatusCode());
+	}
+
+	@Test
+	public void verifyLobbyCanStart_statusNotWaiting_throwsConflict() {
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("PLAYING");
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.verifyLobbyCanStart("token", "S1"));
+		assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+	}
+
+	@Test
+	public void verifyLobbyCanStart_playerIdsNull_throwsBadRequest() {
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(null); // Explicitly null to hit the first half of the OR condition
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.verifyLobbyCanStart("token", "S1"));
+		assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("At least 2 players are required"));
+	}
+
+	@Test
+	public void verifyLobbyCanStart_notEnoughPlayers_throwsBadRequest() {
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L))); // Only 1 player (Host)
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.verifyLobbyCanStart("token", "S1"));
+		assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+	}
+
+	@Test
+	public void verifyLobbyCanStart_playerNotReady_throwsBadRequest() {
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+		lobby.setPlayerReadyByUserId(null); 
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		
+		// FIX: Mock the save method to return the lobby instead of null!
+		Mockito.when(lobbyRepository.save(Mockito.any())).thenAnswer(inv -> inv.getArgument(0));
+
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.verifyLobbyCanStart("token", "S1"));
+		assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("All non-host players must be ready"));
+	}
+
+	@Test
+	public void verifyLobbyCanStart_playerInGracePeriod_noFreshHeartbeat_throwsBadRequest() {
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+		lobby.setPlayerReadyByUserId(Map.of(1L, true, 2L, true));
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		
+		// FIX: Mock the save method here as well
+		Mockito.when(lobbyRepository.save(Mockito.any())).thenAnswer(inv -> inv.getArgument(0));
+		
+		Mockito.when(disconnectService.isPlayerInGracePeriod(2L)).thenReturn(true);
+
+		User guest = new User();
+		guest.setId(2L);
+		guest.setLastHeartbeat(java.time.Instant.now().minusSeconds(100));
+		Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(guest));
+
+		ResponseStatusException ex = assertThrows(ResponseStatusException.class,
+				() -> lobbyService.verifyLobbyCanStart("token", "S1"));
+		assertEquals(HttpStatus.BAD_REQUEST, ex.getStatusCode());
+		assertTrue(ex.getReason().contains("Player disconnected"));
+	}
+
+	@Test
+	public void verifyLobbyCanStart_playerInGracePeriod_withFreshHeartbeat_cancelsTimerAndSucceeds() {
+		User host = new User();
+		host.setId(1L);
+		Mockito.when(userRepository.findByToken("token")).thenReturn(host);
+
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+		lobby.setPlayerReadyByUserId(Map.of(1L, true, 2L, true));
+
+		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(lobby);
+		Mockito.when(lobbyRepository.save(Mockito.any())).thenAnswer(inv -> inv.getArgument(0));
+		
+		// Flag the guest as being in the disconnect grace period
+		Mockito.when(disconnectService.isPlayerInGracePeriod(2L)).thenReturn(true);
+
+		// Mock guest (2L) with a FRESH heartbeat
+		User guest = new User();
+		guest.setId(2L);
+		guest.setLastHeartbeat(java.time.Instant.now());
+		Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(guest));
+
+		// Action
+		Lobby result = lobbyService.verifyLobbyCanStart("token", "S1");
+
+		// Assertion
+		assertNotNull(result);
+		// Verify the stale flag was cleared successfully
+		Mockito.verify(disconnectService).cancelDisconnectTimer(2L);
+	}
+
+	@Test
+	public void handleRoundEndedForGamePlayers_oneArgWrapper_delegatesCorrectly() {
+		// 1. Action: Call the 1-argument wrapper
+		lobbyService.handleRoundEndedForGamePlayers(List.of(1L));
+
+		// 2. Assertion: Verify it successfully delegated to the deeper method without crashing. 
+		// Since we didn't mock an active PLAYING lobby for this user, the downstream method gracefully exits.
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
+
+	@Test
+	public void handleRoundResolvedForGamePlayers_twoArgsWrapper_delegatesCorrectly() {
+		// 1. Action: Call the 2-argument wrapper
+		lobbyService.handleRoundResolvedForGamePlayers(List.of(1L), List.of(1L));
+
+		// 2. Assertion: Verify it successfully delegated to the 3-argument version.
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+	}
 }
