@@ -2945,6 +2945,30 @@ public class LobbyServiceTest {
 	}
 
 	@Test
+	public void resolvePlayingLobbySnapshotForPlayers_returnsSessionColorsAndDistinctSpectators() {
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("PLAY-ABCD");
+		lobby.setSessionHostUserId(1L);
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+		lobby.setSpectatorIds(new ArrayList<>(java.util.Arrays.asList(3L, null, 3L, 4L)));
+		lobby.setAssignedCharacterColorByUserId(new HashMap<>(Map.of(
+				1L, "navy_blue",
+				2L, "light_blue")));
+
+		Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of(lobby));
+		Mockito.when(userRepository.findAllById(Mockito.anyIterable())).thenReturn(List.of());
+
+		LobbyService.PlayingLobbySnapshot snapshot =
+				lobbyService.resolvePlayingLobbySnapshotForPlayers(List.of(1L, 2L));
+
+		assertNotNull(snapshot);
+		assertEquals("PLAY-ABCD", snapshot.getSessionId());
+		assertEquals(Map.of(1L, "navy_blue", 2L, "light_blue"), snapshot.getAssignedCharacterColorsByUserId());
+		assertEquals(List.of(3L, 4L), snapshot.getSpectatorIds());
+	}
+
+	@Test
 	public void refreshWaitingLobbyPresentationForUser_userIdNull_returnsEarly() {
 		// 1. Action
 		lobbyService.refreshWaitingLobbyPresentationForUser(null);

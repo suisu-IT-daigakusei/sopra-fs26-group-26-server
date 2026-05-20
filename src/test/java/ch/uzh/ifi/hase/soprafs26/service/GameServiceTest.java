@@ -1628,6 +1628,28 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
+    void submitRematchDecision_duplicateChoiceFromSamePlayer_isIdempotent() {
+        User user = new User();
+        user.setId(1L);
+        Mockito.when(userRepository.findByToken("t1")).thenReturn(user);
+
+        Game game = new Game();
+        game.setId("g-rematch-idempotent");
+        game.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        game.setRematchDecisionByUserId(new HashMap<>());
+
+        Mockito.when(gameRepository.findById("g-rematch-idempotent")).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        gameService.submitRematchDecision("g-rematch-idempotent", "t1", GameService.REMATCH_DECISION_NONE);
+        gameService.submitRematchDecision("g-rematch-idempotent", "t1", GameService.REMATCH_DECISION_NONE);
+
+        Mockito.verify(gameRepository, Mockito.times(1)).save(Mockito.any(Game.class));
+        Mockito.verify(gameEventPublisher, Mockito.times(1)).publishFilteredState(game);
+    }
+
+    @Test
     void resolveRematchDecision_totalScoreHits100Again_noSecondReductionForSamePlayer() throws Exception {
         Game game = new Game();
         game.setId("g-91-once");

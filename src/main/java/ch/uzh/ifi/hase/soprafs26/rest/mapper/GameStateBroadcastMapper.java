@@ -138,15 +138,22 @@ public class GameStateBroadcastMapper {
         }
 
         if (lobbyService != null) {
-            context.setSessionId(lobbyService.findPlayingSessionIdForPlayers(ordered));
+            LobbyService.PlayingLobbySnapshot snapshot = lobbyService.resolvePlayingLobbySnapshotForPlayers(ordered);
+            if (snapshot != null) {
+                context.setSessionId(snapshot.getSessionId());
+                context.setAssignedCharacterColorByUserId(snapshot.getAssignedCharacterColorsByUserId());
+                context.setSpectatorIds(snapshot.getSpectatorIds());
+            } else {
+                context.setSessionId(lobbyService.findPlayingSessionIdForPlayers(ordered));
+                Map<Long, String> resolvedAssignedColors =
+                        lobbyService.resolvePlayingAssignedCharacterColorsForPlayers(ordered);
+                context.setAssignedCharacterColorByUserId(resolvedAssignedColors == null ? Map.of() : resolvedAssignedColors);
+            }
             context.setTimedOutPlayerIds(
                     ordered.stream()
                             .filter(id -> id != null && lobbyService.isPlayerTimedOutInPlaying(id))
                             .toList()
             );
-
-            Map<Long, String> resolvedAssignedColors = lobbyService.resolvePlayingAssignedCharacterColorsForPlayers(ordered);
-            context.setAssignedCharacterColorByUserId(resolvedAssignedColors == null ? Map.of() : resolvedAssignedColors);
         }
 
         if (userRepository != null) {
@@ -168,6 +175,7 @@ public class GameStateBroadcastMapper {
         private String sessionId;
         private List<Long> timedOutPlayerIds = List.of();
         private Map<Long, String> assignedCharacterColorByUserId = Map.of();
+        private List<Long> spectatorIds = List.of();
         private Map<Long, User> usersById = Map.of();
 
         public String getSessionId() {
@@ -201,6 +209,14 @@ public class GameStateBroadcastMapper {
 
         public void setUsersById(Map<Long, User> usersById) {
             this.usersById = usersById == null ? Map.of() : usersById;
+        }
+
+        public List<Long> getSpectatorIds() {
+            return spectatorIds;
+        }
+
+        public void setSpectatorIds(List<Long> spectatorIds) {
+            this.spectatorIds = spectatorIds == null ? List.of() : spectatorIds;
         }
     }
 

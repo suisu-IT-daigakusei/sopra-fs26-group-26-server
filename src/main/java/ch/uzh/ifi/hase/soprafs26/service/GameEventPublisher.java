@@ -3,7 +3,6 @@ package ch.uzh.ifi.hase.soprafs26.service;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.GameStateBroadcastDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapper;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -21,14 +20,11 @@ public class GameEventPublisher {
     private final SimpMessagingTemplate messagingTemplate;
     // has the logic for filtering
     private final GameStateBroadcastMapper gameStateBroadcastMapper;
-    private final LobbyService lobbyService;
 
     public GameEventPublisher(SimpMessagingTemplate messagingTemplate,
-                              GameStateBroadcastMapper gameStateBroadcastMapper,
-                              @Lazy LobbyService lobbyService) {
+                              GameStateBroadcastMapper gameStateBroadcastMapper) {
         this.messagingTemplate = messagingTemplate;
         this.gameStateBroadcastMapper = gameStateBroadcastMapper;
-        this.lobbyService = lobbyService;
     }
 
     public void publishFilteredState(Game game) {
@@ -42,11 +38,9 @@ public class GameEventPublisher {
         }
         Set<Long> recipientIds = new LinkedHashSet<>();
         recipientIds.addAll(playerIds);
-        if (lobbyService != null) {
-            recipientIds.addAll(lobbyService.findPlayingSpectatorIdsForPlayers(playerIds));
-        }
         GameStateBroadcastMapper.SharedBroadcastContext sharedContext =
                 gameStateBroadcastMapper.buildSharedContext(game);
+        recipientIds.addAll(sharedContext.getSpectatorIds());
 
         for (Long userId : recipientIds) {
             if (userId == null) {

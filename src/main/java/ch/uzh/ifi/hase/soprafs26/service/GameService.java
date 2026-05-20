@@ -1303,6 +1303,13 @@ public class GameService {
                 decisions = new HashMap<>();
                 game.setRematchDecisionByUserId(decisions);
             }
+            String currentDecision = decisions.get(user.getId());
+            if (normalizedDecision.equalsIgnoreCase(String.valueOf(currentDecision))) {
+                if (decisions.keySet().containsAll(players)) {
+                    resolveRematchDecisionLocked(gameId, game, null);
+                }
+                return;
+            }
             decisions.put(user.getId(), normalizedDecision);
             // first user with FRESH decision is saved as rematch requester
             if (REMATCH_DECISION_FRESH.equals(normalizedDecision) && game.getFreshRematchRequesterUserId() == null) {

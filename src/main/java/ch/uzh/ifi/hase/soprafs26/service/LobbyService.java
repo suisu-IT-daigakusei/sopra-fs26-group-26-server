@@ -74,6 +74,31 @@ public class LobbyService {
             Map.entry("plum", "purple"),
             Map.entry("amber", "yellow"));
 
+    public static class PlayingLobbySnapshot {
+        private final String sessionId;
+        private final Map<Long, String> assignedCharacterColorsByUserId;
+        private final List<Long> spectatorIds;
+
+        public PlayingLobbySnapshot(String sessionId, Map<Long, String> assignedCharacterColorsByUserId, List<Long> spectatorIds) {
+            this.sessionId = sessionId;
+            this.assignedCharacterColorsByUserId =
+                    assignedCharacterColorsByUserId == null ? Map.of() : assignedCharacterColorsByUserId;
+            this.spectatorIds = spectatorIds == null ? List.of() : spectatorIds;
+        }
+
+        public String getSessionId() {
+            return sessionId;
+        }
+
+        public Map<Long, String> getAssignedCharacterColorsByUserId() {
+            return assignedCharacterColorsByUserId;
+        }
+
+        public List<Long> getSpectatorIds() {
+            return spectatorIds;
+        }
+    }
+
     public LobbyService(LobbyRepository lobbyRepository,
                         GameRepository gameRepository,
                         UserRepository userRepository,
@@ -1516,8 +1541,31 @@ public class LobbyService {
         return matchingLobby == null ? null : matchingLobby.getSessionId();
     }
 
+    public PlayingLobbySnapshot resolvePlayingLobbySnapshotForPlayers(List<Long> gamePlayerIds) {
+        Lobby matchingLobby = findBestPlayingLobbyForPlayers(gamePlayerIds);
+        if (matchingLobby == null) {
+            return new PlayingLobbySnapshot(null, Map.of(), List.of());
+        }
+        Map<Long, String> assignedColors = resolveAssignedCharacterColorsForLobby(matchingLobby);
+        List<Long> spectatorIds = matchingLobby.getSpectatorIds() == null
+                ? List.of()
+                : matchingLobby.getSpectatorIds().stream()
+                        .filter(id -> id != null)
+                        .distinct()
+                        .toList();
+        return new PlayingLobbySnapshot(matchingLobby.getSessionId(), assignedColors, spectatorIds);
+    }
+
     public Map<Long, String> resolvePlayingAssignedCharacterColorsForPlayers(List<Long> gamePlayerIds) {
         Lobby matchingLobby = findBestPlayingLobbyForPlayers(gamePlayerIds);
+        if (matchingLobby == null || matchingLobby.getPlayerIds() == null || matchingLobby.getPlayerIds().isEmpty()) {
+            return Map.of();
+        }
+
+        return resolveAssignedCharacterColorsForLobby(matchingLobby);
+    }
+
+    private Map<Long, String> resolveAssignedCharacterColorsForLobby(Lobby matchingLobby) {
         if (matchingLobby == null || matchingLobby.getPlayerIds() == null || matchingLobby.getPlayerIds().isEmpty()) {
             return Map.of();
         }

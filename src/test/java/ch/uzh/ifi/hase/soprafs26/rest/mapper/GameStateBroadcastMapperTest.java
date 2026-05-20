@@ -39,6 +39,11 @@ class GameStateBroadcastMapperTest {
         lobbyService = mock(LobbyService.class);
         userRepository = mock(UserRepository.class);
         when(lobbyService.isPlayerTimedOutInPlaying(anyLong())).thenReturn(false);
+        when(lobbyService.resolvePlayingLobbySnapshotForPlayers(anyList()))
+                .thenReturn(new LobbyService.PlayingLobbySnapshot(
+                        "ABCD1234",
+                        Map.of(1L, "navy_blue", 2L, "light_blue"),
+                        List.of(99L)));
         when(lobbyService.findPlayingSessionIdForPlayers(anyList())).thenReturn("ABCD1234");
         when(lobbyService.resolvePlayingAssignedCharacterColorsForPlayers(anyList()))
                 .thenReturn(Map.of(1L, "navy_blue", 2L, "light_blue"));
@@ -52,6 +57,18 @@ class GameStateBroadcastMapperTest {
         user2.setProfileCharacterId("char02");
         when(userRepository.findAllById(anyList())).thenReturn(List.of(user1, user2));
         mapper = new GameStateBroadcastMapper(lobbyService, userRepository);
+    }
+
+    @Test
+    void buildSharedContext_usesSnapshotDataIncludingSpectators() {
+        Game game = new Game();
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+
+        GameStateBroadcastMapper.SharedBroadcastContext context = mapper.buildSharedContext(game);
+
+        assertEquals("ABCD1234", context.getSessionId());
+        assertEquals(Map.of(1L, "navy_blue", 2L, "light_blue"), context.getAssignedCharacterColorByUserId());
+        assertEquals(List.of(99L), context.getSpectatorIds());
     }
 
     @Test
