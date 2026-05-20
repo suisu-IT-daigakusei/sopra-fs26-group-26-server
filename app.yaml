@@ -13,7 +13,7 @@ runtime_config:
 
 automatic_scaling:
   max_num_instances: 1
-  min_num_instances: 0
+  min_num_instances: 1
 
 env_variables:
   SPRING_PROFILES_ACTIVE: "gcp"
