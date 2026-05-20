@@ -11,6 +11,10 @@ public class GameSyncStateDTO {
 
     private String status;
     private Long currentTurnUserId;
+    private Boolean caboCalled;
+    private Boolean caboForcedByTimeout;
+    private List<Long> timedOutPlayerIds;
+    private Long afkTimeoutSeconds;
     private List<Card> myHand;
     private Card discardTop;
     private Card drawnCard;
@@ -31,6 +35,38 @@ public class GameSyncStateDTO {
 
     public void setCurrentTurnUserId(Long currentTurnUserId) {
         this.currentTurnUserId = currentTurnUserId;
+    }
+
+    public Boolean getCaboCalled() {
+        return caboCalled;
+    }
+
+    public void setCaboCalled(Boolean caboCalled) {
+        this.caboCalled = caboCalled;
+    }
+
+    public Boolean getCaboForcedByTimeout() {
+        return caboForcedByTimeout;
+    }
+
+    public void setCaboForcedByTimeout(Boolean caboForcedByTimeout) {
+        this.caboForcedByTimeout = caboForcedByTimeout;
+    }
+
+    public List<Long> getTimedOutPlayerIds() {
+        return timedOutPlayerIds;
+    }
+
+    public void setTimedOutPlayerIds(List<Long> timedOutPlayerIds) {
+        this.timedOutPlayerIds = timedOutPlayerIds;
+    }
+
+    public Long getAfkTimeoutSeconds() {
+        return afkTimeoutSeconds;
+    }
+
+    public void setAfkTimeoutSeconds(Long afkTimeoutSeconds) {
+        this.afkTimeoutSeconds = afkTimeoutSeconds;
     }
 
     public List<Card> getMyHand() {

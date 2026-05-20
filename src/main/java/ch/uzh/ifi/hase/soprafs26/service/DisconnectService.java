@@ -20,7 +20,6 @@ import java.util.concurrent.*;
 @Service
 @Transactional
 public class DisconnectService {
-
     private final UserRepository userRepository;
     private final LobbyService lobbyService;
     private final GameService gameService;
@@ -66,13 +65,15 @@ public class DisconnectService {
         // In active games, do not fast-timeout on websocket disconnect alone (tab switch/background throttling).
         // AFK handling should follow the configured game AFK timer via heartbeat idle checks.
         if (lobbyService != null && lobbyService.isUserInActiveGame(userId)) {
-            // Reset AFK baseline on midgame websocket loss so a short tab/background switch
-            // cannot instantly trigger timeout because of an older stale heartbeat.
-            userRepository.findById(userId).ifPresent(user -> {
-                user.setLastHeartbeat(Instant.now());
-                userRepository.save(user);
-            });
             cancelDisconnectTimer(userId);
+            long websocketGraceSeconds = resolveWebsocketGraceSecondsForUser(userId);
+            ScheduledFuture<?> future = scheduler.schedule(() -> {
+                if (hasActiveWebSocketSession(userId)) {
+                    return;
+                }
+                performPermanentRemoval(userId, "websocket_grace_active_game", websocketGraceSeconds);
+            }, websocketGraceSeconds, TimeUnit.SECONDS);
+            activeTimers.put(userId, future);
             return;
         }
         cancelDisconnectTimer(userId);
@@ -87,7 +88,7 @@ public class DisconnectService {
 
     /**
      * RULE 2: Idle Timeout (User is there but silent for a longer period).
-     * Checked every minute via @Scheduled.
+     * Checked periodically via @Scheduled.
      */
     @Scheduled(fixedDelayString = "#{@timeoutSettingsProperties.idleCheckIntervalMs}")
     public void checkIdleUsers() {
@@ -118,10 +119,6 @@ public class DisconnectService {
                 continue;
             }
 
-            if (userInActiveGame && hasActiveWebSocketSession(user.getId())) {
-                // Prevent false AFK/Cabo while the player is still connected to the running game.
-                continue;
-            }
             if (userInActiveGame && lobbyService != null && lobbyService.isPlayerTimedOutInPlaying(user.getId())) {
                 // Already marked timed out for active game: avoid repeated removals/log spam.
                 continue;
@@ -132,7 +129,16 @@ public class DisconnectService {
 
     private long resolveIdleThresholdSecondsForUser(Long userId) {
         long defaultIdle = timeoutSettings.getIdleSeconds();
-        if (userId == null || gameService == null) {
+        if (userId == null) {
+            return defaultIdle;
+        }
+        if (lobbyService != null) {
+            Long lobbyAfkTimeout = lobbyService.findAfkTimeoutSecondsForUser(userId);
+            if (lobbyAfkTimeout != null && lobbyAfkTimeout > 0) {
+                return lobbyAfkTimeout;
+            }
+        }
+        if (gameService == null) {
             return defaultIdle;
         }
         return gameService.findActiveGameForUser(userId)
@@ -185,6 +191,7 @@ public class DisconnectService {
     }
 
     public void handleReconnect(Long userId) {
+        webSocketSessionTracker.touchSessions(userId);
         cancelDisconnectTimer(userId);
         lobbyService.clearTimedOutPlayingFlag(userId);
     }
@@ -234,6 +241,11 @@ public class DisconnectService {
      * Final cleanup after websocket grace or idle timeout.
      */
     private void performPermanentRemoval(Long userId, String reason, long thresholdSeconds) {
+        boolean idleTimeoutPath = "idle".equalsIgnoreCase(String.valueOf(reason));
+        if (!idleTimeoutPath && hasActiveWebSocketSession(userId)) {
+            cancelDisconnectTimer(userId);
+            return;
+        }
         User user = userRepository.findById(userId).orElse(null);
         if (user == null) return;
         if (user.getStatus() == UserStatus.SPECTATING) {

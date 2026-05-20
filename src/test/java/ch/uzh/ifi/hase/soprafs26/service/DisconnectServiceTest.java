@@ -19,9 +19,11 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -96,6 +98,53 @@ class DisconnectServiceTest {
     }
 
     @Test
+    void checkIdleUsers_staleActiveGameUserWithActiveSession_stillTriggersPermanentDisconnect() {
+        User activeGameUser = createUser(81L, UserStatus.PLAYING, "playing-token", Instant.now().minusSeconds(9999));
+
+        when(userRepository.findByStatusNot(UserStatus.OFFLINE)).thenReturn(List.of(activeGameUser));
+        when(lobbyService.getPlayingLobbyPlayerIdsSnapshot()).thenReturn(Set.of(81L));
+        when(userRepository.findById(81L)).thenReturn(Optional.of(activeGameUser));
+        when(lobbyService.isPlayerTimedOutInPlaying(81L)).thenReturn(false);
+
+        disconnectService.checkIdleUsers();
+
+        verify(lobbyService).handlePermanentDisconnect(81L);
+    }
+
+    @Test
+    void handleConnectionLoss_activeGameUser_entersGraceTimer() {
+        User activePlayer = createUser(77L, UserStatus.PLAYING, "active-token", Instant.now());
+
+        when(webSocketSessionTracker.hasActiveSession(77L)).thenReturn(false);
+        when(userRepository.findById(77L)).thenReturn(Optional.of(activePlayer));
+        when(lobbyService.isUserInLobbyContext(77L)).thenReturn(true);
+        when(lobbyService.isUserInActiveGame(77L)).thenReturn(true);
+        when(lobbyService.findWebsocketGraceSecondsForUser(77L)).thenReturn(300L);
+
+        disconnectService.handleConnectionLoss(77L);
+
+        assertTrue(disconnectService.isPlayerInGracePeriod(77L));
+        verify(userRepository, never()).save(activePlayer);
+    }
+
+    @Test
+    void checkIdleUsers_activeGameUser_prefersLobbyAfkTimeoutBeforeGameLookup() {
+        User activeGameUser = createUser(82L, UserStatus.PLAYING, "playing-token", Instant.now().minusSeconds(9999));
+
+        when(userRepository.findByStatusNot(UserStatus.OFFLINE)).thenReturn(List.of(activeGameUser));
+        when(lobbyService.getPlayingLobbyPlayerIdsSnapshot()).thenReturn(Set.of(82L));
+        when(lobbyService.findAfkTimeoutSecondsForUser(82L)).thenReturn(180L);
+        when(userRepository.findById(82L)).thenReturn(Optional.of(activeGameUser));
+        when(lobbyService.isPlayerTimedOutInPlaying(82L)).thenReturn(false);
+
+        disconnectService.checkIdleUsers();
+
+        verify(lobbyService).findAfkTimeoutSecondsForUser(82L);
+        verify(gameService, never()).findActiveGameForUser(82L);
+        verify(lobbyService).handlePermanentDisconnect(82L);
+    }
+
+    @Test
     void checkAutoLogoutUsers_spectator_isLoggedOut() {
         User spectator = createUser(99L, UserStatus.SPECTATING, AUTO_LOGOUT_TOKEN, Instant.now().minusSeconds(9999));
         stubAutoLogoutCandidates(List.of(spectator));
@@ -124,6 +173,14 @@ class DisconnectServiceTest {
         disconnectService.checkAutoLogoutUsers();
 
         verify(userRepository, never()).save(any(User.class));
+    }
+
+    @Test
+    void handleReconnect_refreshesTrackedSessionsAndClearsTimedOutFlag() {
+        disconnectService.handleReconnect(123L);
+
+        verify(webSocketSessionTracker, times(1)).touchSessions(123L);
+        verify(lobbyService, times(1)).clearTimedOutPlayingFlag(123L);
     }
 
     private void stubAutoLogoutCandidates(List<User> candidates) {

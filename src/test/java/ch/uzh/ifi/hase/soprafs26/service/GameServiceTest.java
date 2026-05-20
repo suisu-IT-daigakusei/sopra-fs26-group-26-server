@@ -13,6 +13,7 @@ import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CardDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CardViewDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.GameStateBroadcastDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.GameSyncStateDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.PeekSelectionDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.mapper.GameStateBroadcastMapper;
 import ch.uzh.ifi.hase.soprafs26.entity.PlayerActionEvent;
@@ -93,6 +94,9 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     @Mock
     private LobbyChatService lobbyChatService;
 
+    @Mock
+    private WebSocketSessionTracker webSocketSessionTracker;
+
     @InjectMocks
     private GameService gameService;
 
@@ -113,6 +117,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         Mockito.when(gameSettings.getCaboRevealSeconds()).thenReturn(30L);
         Mockito.when(gameSettings.getRematchDecisionSeconds()).thenReturn(60L);
         Mockito.when(lobbyService.isPlayerTimedOutInPlaying(Mockito.anyLong())).thenReturn(false);
+        Mockito.when(webSocketSessionTracker.hasActiveSession(Mockito.anyLong())).thenReturn(false);
         Mockito.when(lobbyService.resolvePlayingAssignedCharacterColorsForPlayers(anyList())).thenReturn(Map.of());
         Mockito.when(userRepository.findAllById(any())).thenReturn(List.of());
         // mock timer without waiting for it
@@ -258,6 +263,149 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertEquals(3L, game.getCurrentPlayerId());
         verify(lobbyService).isPlayerTimedOutInPlaying(2L);
         verify(gameEventPublisher, Mockito.atLeastOnce()).publishFilteredState(any(Game.class));
+    }
+
+    @Test
+    void advanceTurnToNextPlayer_timedOutFlagWithActiveSessionAndFreshHeartbeat_doesNotAutoCallCabo() {
+        Game game = new Game();
+        game.setId(GAME_ID);
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L, 3L)));
+        game.setCurrentPlayerId(1L);
+        User timedOutPlayer = new User();
+        timedOutPlayer.setId(2L);
+        timedOutPlayer.setLastHeartbeat(java.time.Instant.now());
+
+        Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        Mockito.doNothing().when(gameRepository).flush();
+        Mockito.when(lobbyService.isPlayerTimedOutInPlaying(2L)).thenReturn(true);
+        Mockito.when(webSocketSessionTracker.hasActiveSession(2L)).thenReturn(true);
+        Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(timedOutPlayer));
+
+        gameService.advanceTurnToNextPlayer(GAME_ID);
+
+        assertFalse(game.isCaboCalled());
+        assertEquals(2L, game.getCurrentPlayerId());
+        verify(lobbyService).clearTimedOutPlayingFlag(2L);
+    }
+
+    @Test
+    void advanceTurnToNextPlayer_timedOutFlagWithActiveSessionAndStaleHeartbeat_autoCallsCabo() {
+        Game game = new Game();
+        game.setId(GAME_ID);
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L, 3L)));
+        game.setCurrentPlayerId(1L);
+        User timedOutPlayer = new User();
+        timedOutPlayer.setId(2L);
+        timedOutPlayer.setLastHeartbeat(java.time.Instant.now().minusSeconds(120));
+
+        Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        Mockito.doNothing().when(gameRepository).flush();
+        Mockito.when(lobbyService.isPlayerTimedOutInPlaying(2L)).thenReturn(true);
+        Mockito.when(webSocketSessionTracker.hasActiveSession(2L)).thenReturn(true);
+        Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(timedOutPlayer));
+
+        gameService.advanceTurnToNextPlayer(GAME_ID);
+
+        assertTrue(game.isCaboCalled());
+        assertTrue(game.isCaboForcedByTimeout());
+        assertEquals(2L, game.getCaboCalledByUserId());
+    }
+
+    @Test
+    void handlePlayerDisconnectDuringActiveGame_notCurrentPlayer_doesNotForceImmediateCabo() {
+        Game game = new Game();
+        game.setId(GAME_ID);
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        game.setCurrentPlayerId(1L);
+
+        Mockito.when(gameRepository.findGamesByPlayerId(2L)).thenReturn(List.of(game));
+        Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        Mockito.doNothing().when(gameRepository).flush();
+
+        gameService.handlePlayerDisconnectDuringActiveGame(2L);
+
+        assertFalse(game.isCaboCalled());
+        assertEquals(1L, game.getCurrentPlayerId());
+    }
+
+    @Test
+    void handlePlayerDisconnectDuringActiveGame_currentPlayer_forcesAfkCaboAndAdvances() {
+        Game game = new Game();
+        game.setId(GAME_ID);
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        game.setCurrentPlayerId(2L);
+
+        Mockito.when(gameRepository.findGamesByPlayerId(2L)).thenReturn(List.of(game));
+        Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        Mockito.doNothing().when(gameRepository).flush();
+
+        gameService.handlePlayerDisconnectDuringActiveGame(2L);
+
+        assertTrue(game.isCaboCalled());
+        assertTrue(game.isCaboForcedByTimeout());
+        assertEquals(2L, game.getCaboCalledByUserId());
+        assertEquals(1L, game.getCurrentPlayerId());
+    }
+
+    @Test
+    void handlePlayerDisconnectDuringActiveGame_currentPlayerWithFreshHeartbeatAndActiveSession_doesNotForceCabo() {
+        Game game = new Game();
+        game.setId(GAME_ID);
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        game.setCurrentPlayerId(2L);
+        User player = new User();
+        player.setId(2L);
+        player.setLastHeartbeat(java.time.Instant.now());
+
+        Mockito.when(gameRepository.findGamesByPlayerId(2L)).thenReturn(List.of(game));
+        Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
+        Mockito.when(webSocketSessionTracker.hasActiveSession(2L)).thenReturn(true);
+        Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(player));
+
+        gameService.handlePlayerDisconnectDuringActiveGame(2L);
+
+        assertFalse(game.isCaboCalled());
+        verify(lobbyService).clearTimedOutPlayingFlag(2L);
+    }
+
+    @Test
+    void getSyncStateSnapshotForToken_includesCaboAndTimeoutFlags() {
+        User viewer = new User();
+        viewer.setId(1L);
+        viewer.setToken("token-sync");
+
+        Game game = new Game();
+        game.setId(GAME_ID);
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        game.setCurrentPlayerId(2L);
+        game.setCaboCalled(true);
+        game.setCaboForcedByTimeout(true);
+        game.setAfkTimeoutSeconds(420L);
+        game.setPlayerHands(new HashMap<>(Map.of(1L, new ArrayList<>())));
+
+        Mockito.when(userRepository.findByToken("token-sync")).thenReturn(viewer);
+        Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
+        Mockito.when(lobbyService.isPlayerTimedOutInPlaying(1L)).thenReturn(false);
+        Mockito.when(lobbyService.isPlayerTimedOutInPlaying(2L)).thenReturn(true);
+
+        GameService.SyncStateSnapshot snapshot = gameService.getSyncStateSnapshotForToken(GAME_ID, "token-sync");
+        GameSyncStateDTO payload = snapshot.getPayload();
+
+        assertNotNull(payload);
+        assertEquals(true, payload.getCaboCalled());
+        assertEquals(true, payload.getCaboForcedByTimeout());
+        assertEquals(420L, payload.getAfkTimeoutSeconds());
+        assertEquals(List.of(2L), payload.getTimedOutPlayerIds());
     }
 
     // placeholder testing 1/3
@@ -1727,6 +1875,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
                 return Optional.of(game); // Second call (filled)
             }
         });
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
         Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
         gameService.moveDrawFromDrawPile("g-reshuffle", "testToken");
@@ -2892,6 +3041,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setDrawPile(new ArrayList<>(List.of(topCard)));
         
         Mockito.when(gameRepository.findById("game-1")).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
 
         // Create a manual mock publisher just for this test
         ApplicationEventPublisher mockPublisher = Mockito.mock(ApplicationEventPublisher.class);
@@ -2935,6 +3085,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setDrawPile(new ArrayList<>(List.of(topCard)));
         
         Mockito.when(gameRepository.findById("game-1")).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
         
         Mockito.when(lobbyService.findPlayingSessionIdForPlayers(game.getOrderedPlayerIds()))
                .thenReturn("session-99");
@@ -2978,6 +3129,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setDrawPile(new ArrayList<>(List.of(topCard)));
         
         Mockito.when(gameRepository.findById("game-1")).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
 
         // Create a custom GameService. 
         // 9th param: LobbyChatService (null)

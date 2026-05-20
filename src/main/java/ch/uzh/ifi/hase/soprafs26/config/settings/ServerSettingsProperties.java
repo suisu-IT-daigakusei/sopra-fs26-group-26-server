@@ -84,7 +84,7 @@ public class ServerSettingsProperties {
     private long rematchDuplicateDecisionWindowMs = 900;
 
     @Min(1000)
-    private long websocketSessionStaleAfterMs = 120000;
+    private long websocketSessionStaleAfterMs = 660000;
     @Min(1000)
     private long websocketSessionPruneIntervalMs = 30000;
 

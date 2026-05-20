@@ -125,6 +125,7 @@ public class GameService {
     private final SessionRepository sessionRepository;
     private final GameSettingsProperties gameSettings;
     private final ServerSettingsProperties serverSettings;
+    private final WebSocketSessionTracker webSocketSessionTracker;
     // map to store tasks - key: gameId, value: scheduled task
     private final Map<String, ScheduledFuture<?>> gameTimers = new ConcurrentHashMap<>();
     // per-game count so an outdated scheduled ability timer cannot execute 
@@ -217,6 +218,7 @@ public class GameService {
                 gameSettings,
                 null,
                 null,
+                null,
                 null);
     }
 
@@ -229,7 +231,8 @@ public class GameService {
                        GameSettingsProperties gameSettings,
                        @Lazy LobbyChatService lobbyChatService,
                        ApplicationEventPublisher eventPublisher,
-                       @Lazy ServerSettingsProperties serverSettings) {
+                       @Lazy ServerSettingsProperties serverSettings,
+                       @Lazy WebSocketSessionTracker webSocketSessionTracker) {
         this.gameRepository = gameRepository;
         this.deckOfCardsAPIService = deckOfCardsAPIService;
         this.userRepository = userRepository;
@@ -241,6 +244,32 @@ public class GameService {
         this.lobbyChatService = lobbyChatService;
         this.eventPublisher = eventPublisher;
         this.serverSettings = serverSettings == null ? new ServerSettingsProperties() : serverSettings;
+        this.webSocketSessionTracker = webSocketSessionTracker;
+    }
+
+    // Backward-compatible constructor used by tests and utilities that do not provide the tracker.
+    public GameService(GameRepository gameRepository, DeckOfCardsAPIService deckOfCardsAPIService,
+                       UserRepository userRepository, GameEventPublisher gameEventPublisher,
+                       ScheduledExecutorService scheduler, @Lazy LobbyService lobbyService,
+                       @Lazy SessionRepository sessionRepository,
+                       GameSettingsProperties gameSettings,
+                       @Lazy LobbyChatService lobbyChatService,
+                       ApplicationEventPublisher eventPublisher,
+                       @Lazy ServerSettingsProperties serverSettings) {
+        this(
+                gameRepository,
+                deckOfCardsAPIService,
+                userRepository,
+                gameEventPublisher,
+                scheduler,
+                lobbyService,
+                sessionRepository,
+                gameSettings,
+                lobbyChatService,
+                eventPublisher,
+                serverSettings,
+                null
+        );
     }
 
     public Game startGame(List<Long> playerIds) {
@@ -632,6 +661,10 @@ public class GameService {
         CRC32 crc = new CRC32();
         updateChecksum(crc, syncState == null ? null : syncState.getStatus());
         updateChecksum(crc, syncState == null ? null : syncState.getCurrentTurnUserId());
+        updateChecksum(crc, syncState == null ? null : syncState.getCaboCalled());
+        updateChecksum(crc, syncState == null ? null : syncState.getCaboForcedByTimeout());
+        updateChecksum(crc, syncState == null ? null : syncState.getTimedOutPlayerIds());
+        updateChecksum(crc, syncState == null ? null : syncState.getAfkTimeoutSeconds());
         updateChecksum(crc, syncState == null ? null : syncState.getPostRoundSessionId());
         updateChecksum(crc, syncState == null ? null : syncState.getRematchDecisionSeconds());
         updateChecksumWithCard(crc, syncState == null ? null : syncState.getDiscardTop());
@@ -693,6 +726,19 @@ public class GameService {
         GameSyncStateDTO syncState = new GameSyncStateDTO();
         syncState.setStatus(game.getStatus() == null ? null : game.getStatus().name());
         syncState.setCurrentTurnUserId(game.getCurrentPlayerId());
+        syncState.setCaboCalled(game.isCaboCalled());
+        syncState.setCaboForcedByTimeout(game.isCaboForcedByTimeout());
+        syncState.setAfkTimeoutSeconds(game.getAfkTimeoutSeconds());
+        if (lobbyService != null) {
+            List<Long> orderedPlayers = game.getOrderedPlayerIds() == null ? List.of() : game.getOrderedPlayerIds();
+            syncState.setTimedOutPlayerIds(
+                    orderedPlayers.stream()
+                            .filter(id -> id != null && lobbyService.isPlayerTimedOutInPlaying(id))
+                            .toList()
+            );
+        } else {
+            syncState.setTimedOutPlayerIds(List.of());
+        }
         syncState.setDiscardTop(resolveDiscardTopCardForResponse(game));
         syncState.setDrawnCard(resolveDrawnCardForViewer(game, viewer.getId(), participant));
         syncState.setMyHand(participant
@@ -1834,7 +1880,7 @@ public class GameService {
     }
 
     private Optional<Game> findActiveGameForSpectator(Long userId) {
-        if (userId == null || lobbyService == null) {
+        if (userId == null) {
             return Optional.empty();
         }
         Optional<Lobby> playingLobbyForSpectator = lobbyService.findLatestPlayingLobbyForSpectator(userId);
@@ -1848,6 +1894,18 @@ public class GameService {
         if (userId == null) {
             return Optional.empty();
         }
+        if (lobbyService != null) {
+            Optional<Lobby> playingLobbyForPlayer = lobbyService.findLatestPlayingLobbyForPlayer(userId);
+            if (playingLobbyForPlayer == null) {
+                playingLobbyForPlayer = Optional.empty();
+            }
+            if (playingLobbyForPlayer.isPresent()) {
+                Optional<Game> activeByLobby = findActiveGameMatchingLobbyPlayers(playingLobbyForPlayer.get().getPlayerIds());
+                if (activeByLobby.isPresent()) {
+                    return activeByLobby;
+                }
+            }
+        }
 
         return gameRepository.findGamesByPlayerId(userId).stream()
                 .filter(this::isActiveGame)
@@ -1860,6 +1918,77 @@ public class GameService {
         User user = requireAuthenticatedUser(token);
         return findActiveGameForUser(user.getId())
                 .or(() -> findActiveGameForSpectator(user.getId()));
+    }
+
+    public void handlePlayerDisconnectDuringActiveGame(Long userId) {
+        if (userId == null) {
+            return;
+        }
+        if (webSocketSessionTracker != null && webSocketSessionTracker.hasActiveSession(userId)) {
+            boolean hasFreshActivity = hasFreshHeartbeat(userId, 45);
+            if (lobbyService != null && hasFreshActivity) {
+                lobbyService.clearTimedOutPlayingFlag(userId);
+            }
+            if (hasFreshActivity) {
+                return;
+            }
+        }
+
+        Optional<Game> activeGame = findActiveGameForUser(userId);
+        if (activeGame.isEmpty()) {
+            return;
+        }
+
+        Game game = activeGame.get();
+        String gameId = game.getId();
+        if (gameId == null || gameId.isBlank()) {
+            return;
+        }
+
+        if (game.getStatus() == GameStatus.ROUND_AWAITING_REMATCH) {
+            synchronized (getRematchResolutionLock(gameId)) {
+                Game latest = getGameById(gameId);
+                List<Long> players = latest.getOrderedPlayerIds();
+                if (players == null || !players.contains(userId)) {
+                    return;
+                }
+
+                Map<Long, String> decisions = latest.getRematchDecisionByUserId();
+                if (decisions == null) {
+                    decisions = new HashMap<>();
+                    latest.setRematchDecisionByUserId(decisions);
+                }
+
+                String currentDecision = decisions.get(userId);
+                if (!REMATCH_DECISION_NONE.equalsIgnoreCase(String.valueOf(currentDecision))) {
+                    decisions.put(userId, REMATCH_DECISION_NONE);
+                    saveGameAndBroadcast(latest);
+                }
+
+                if (decisions.keySet().containsAll(players)) {
+                    resolveRematchDecisionLocked(gameId, latest, null);
+                }
+            }
+            return;
+        }
+
+        if (game.getStatus() == GameStatus.ROUND_ENDED
+                || game.getStatus() == GameStatus.CABO_REVEAL
+                || game.isCaboCalled()) {
+            return;
+        }
+
+        Long currentPlayerId = game.getCurrentPlayerId();
+        if (currentPlayerId == null) {
+            return;
+        }
+        if (!currentPlayerId.equals(userId)) {
+            // Keep only the timed-out flag for now. Auto-Cabo will trigger when the disconnected
+            // player's turn starts, so remaining players still get their final-turn flow.
+            return;
+        }
+
+        forceCallCabo(gameId, userId);
     }
 
     // Convenience method for callers that only know the user (e.g., lobby kicks/disconnect handling)
@@ -1879,9 +2008,6 @@ public class GameService {
     // save in db and send filtered representations to all players 
     private Game saveGameAndBroadcast(Game game) {
         Game saved = gameRepository.save(game);
-        if (saved == null) {
-            saved = game;
-        }
         invalidateSyncStateCacheForGame(saved.getId());
         gameEventPublisher.publishFilteredState(saved);
         return saved;
@@ -2117,6 +2243,13 @@ public class GameService {
         }
         if (!lobbyService.isPlayerTimedOutInPlaying(playerId)) {
             return false;
+        }
+        if (webSocketSessionTracker != null && webSocketSessionTracker.hasActiveSession(playerId)) {
+            if (hasFreshHeartbeat(playerId, 45)) {
+                lobbyService.clearTimedOutPlayingFlag(playerId);
+                log.info("Ignoring stale timed-out flag for connected player {}.", playerId);
+                return false;
+            }
         }
         // Self-heal stale timeout flags to avoid false auto-Cabo.
         if (hasFreshHeartbeat(playerId, 45)) {

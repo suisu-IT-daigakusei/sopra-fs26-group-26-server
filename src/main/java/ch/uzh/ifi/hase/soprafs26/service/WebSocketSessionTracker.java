@@ -72,6 +72,55 @@ public class WebSocketSessionTracker {
         }
     }
 
+    public void touchSession(Long userId, String sessionId) {
+        if (userId == null || sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+
+        UserSessionBucket bucket = sessionsByUserId.get(userId);
+        if (bucket == null) {
+            return;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        synchronized (bucket) {
+            pruneStaleSessionsLocked(bucket, nowMs);
+            if (!bucket.sessionsInOrder.containsKey(sessionId)) {
+                if (bucket.sessionsInOrder.isEmpty()) {
+                    sessionsByUserId.remove(userId, bucket);
+                }
+                return;
+            }
+            bucket.sessionsInOrder.put(sessionId, nowMs);
+        }
+    }
+
+    public void touchSessions(Long userId) {
+        if (userId == null) {
+            return;
+        }
+
+        UserSessionBucket bucket = sessionsByUserId.get(userId);
+        if (bucket == null) {
+            return;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        synchronized (bucket) {
+            pruneStaleSessionsLocked(bucket, nowMs);
+            if (bucket.sessionsInOrder.isEmpty()) {
+                sessionsByUserId.remove(userId, bucket);
+                return;
+            }
+            for (String sessionId : new ArrayList<>(bucket.sessionsInOrder.keySet())) {
+                if (sessionId == null || sessionId.isBlank()) {
+                    continue;
+                }
+                bucket.sessionsInOrder.put(sessionId, nowMs);
+            }
+        }
+    }
+
     public boolean hasActiveSession(Long userId) {
         if (userId == null) {
             return false;

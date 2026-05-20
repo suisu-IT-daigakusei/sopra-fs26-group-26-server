@@ -28,6 +28,7 @@ class WebSocketSessionTrackerTest {
     void setUp() {
         ServerSettingsProperties settings = new ServerSettingsProperties();
         settings.setMaxWebsocketSessionsPerUser(2);
+        settings.setWebsocketSessionStaleAfterMs(1000L);
         when(settingsProvider.getIfAvailable(any(java.util.function.Supplier.class))).thenReturn(settings);
         tracker = new WebSocketSessionTracker(settingsProvider);
     }
@@ -60,5 +61,31 @@ class WebSocketSessionTrackerTest {
 
         assertFalse(tracker.hasActiveSession(9L));
         assertEquals(List.of(), tracker.getTrackedSessionIds(9L));
+    }
+
+    @Test
+    void touchSession_refreshesTimestampAndDelaysStalePrune() throws InterruptedException {
+        tracker.registerSession(11L, "session");
+
+        Thread.sleep(700L);
+        tracker.touchSession(11L, "session");
+
+        Thread.sleep(700L);
+        assertTrue(tracker.hasActiveSession(11L));
+
+        Thread.sleep(450L);
+        assertFalse(tracker.hasActiveSession(11L));
+    }
+
+    @Test
+    void touchSessions_refreshesAllTrackedSessions() throws InterruptedException {
+        tracker.registerSession(12L, "s1");
+        tracker.registerSession(12L, "s2");
+
+        Thread.sleep(700L);
+        tracker.touchSessions(12L);
+
+        Thread.sleep(700L);
+        assertEquals(List.of("s1", "s2"), tracker.getTrackedSessionIds(12L));
     }
 }

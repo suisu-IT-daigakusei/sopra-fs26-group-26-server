@@ -599,6 +599,17 @@ public class LobbyService {
                 .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)));
     }
 
+    public Optional<Lobby> findLatestPlayingLobbyForPlayer(Long userId) {
+        if (userId == null) {
+            return Optional.empty();
+        }
+        return lobbyRepository.findByStatusAndParticipantId("PLAYING", userId).stream()
+                .filter(lobby -> lobby != null
+                        && lobby.getPlayerIds() != null
+                        && lobby.getPlayerIds().contains(userId))
+                .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)));
+    }
+
     public Long findWebsocketGraceSecondsForUser(Long userId) {
         if (userId == null) {
             return null;
@@ -616,6 +627,26 @@ public class LobbyService {
             return playingLobby.getWebsocketGraceSeconds();
         }
         return null;
+    }
+
+    public Long findAfkTimeoutSecondsForUser(Long userId) {
+        if (userId == null) {
+            return null;
+        }
+        Lobby playingLobby = lobbyRepository.findByStatusAndParticipantId("PLAYING", userId).stream()
+                .filter(lobby -> lobby != null
+                        && lobby.getPlayerIds() != null
+                        && lobby.getPlayerIds().contains(userId))
+                .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)))
+                .orElse(null);
+        if (playingLobby == null) {
+            return null;
+        }
+        Long afkTimeout = playingLobby.getAfkTimeoutSeconds();
+        if (afkTimeout == null || afkTimeout <= 0) {
+            return null;
+        }
+        return afkTimeout;
     }
 
     private void cleanupStalePlayingLobbiesForHost(Long hostUserId) {
@@ -1923,6 +1954,9 @@ public class LobbyService {
             boolean isPlayer = lobby.getPlayerIds() != null && lobby.getPlayerIds().contains(userId);
             if (isPlayer) {
                 timedOutInPlayingPlayerIds.add(userId);
+                if (gameService != null) {
+                    gameService.handlePlayerDisconnectDuringActiveGame(userId);
+                }
             } else {
                 // remove spectator on disconnect
                 if (lobby.getSpectatorIds() != null) {

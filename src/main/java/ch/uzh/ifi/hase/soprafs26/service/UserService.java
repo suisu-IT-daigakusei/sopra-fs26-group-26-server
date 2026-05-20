@@ -530,6 +530,7 @@ public class UserService {
 
             // get round scores for session
             List<Map<Long, Integer>> perRound = session.getUserScoresPerRound();
+            Map<Long, Integer> recomputedTotalScoreByUserId = new HashMap<>();
 
             // skip invalid per round scores
             if (perRound != null) {
@@ -567,6 +568,7 @@ public class UserService {
                         // update aggregated round metrics
                         cumulativeRoundScoreByUserId.merge(userId, score.longValue(), Long::sum);
                         roundsPlayedByUserId.merge(userId, 1, Integer::sum);
+                        recomputedTotalScoreByUserId.merge(userId, score, Integer::sum);
                         // increment the round wins only when score matches best score  (or for all users that tie)
                         if (Objects.equals(score, bestRoundScore)) {
                             roundWinsByUserId.merge(userId, 1, Integer::sum);
@@ -583,13 +585,33 @@ public class UserService {
 
             // get total score map (user id - total score) for current session
             Map<Long, Integer> totalScoreByUserId = session.getTotalScoreByUserId();
+            Map<Long, Integer> normalizedTotalScoreByUserId = new HashMap<>();
+            if (totalScoreByUserId != null) {
+                for (Map.Entry<Long, Integer> entry : totalScoreByUserId.entrySet()) {
+                    Long userId = entry.getKey();
+                    Integer score = entry.getValue();
+                    if (userId == null || score == null) {
+                        continue;
+                    }
+                    normalizedTotalScoreByUserId.put(userId, score);
+                }
+            }
+            for (Map.Entry<Long, Integer> entry : recomputedTotalScoreByUserId.entrySet()) {
+                Long userId = entry.getKey();
+                Integer score = entry.getValue();
+                if (userId == null || score == null) {
+                    continue;
+                }
+                normalizedTotalScoreByUserId.putIfAbsent(userId, score);
+            }
+
             // if total score map is invalid - skip
-            if (totalScoreByUserId == null || totalScoreByUserId.isEmpty()) {
+            if (normalizedTotalScoreByUserId.isEmpty()) {
                 continue;
             }
 
             // get best total score for current session
-            Integer bestSessionScore = totalScoreByUserId.values().stream()
+            Integer bestSessionScore = normalizedTotalScoreByUserId.values().stream()
                     .filter(Objects::nonNull) // leave out nulls 
                     .min(Integer::compareTo) // get smallest total score
                     .orElse(null); // if nothing is left after filtering - return null
@@ -598,7 +620,7 @@ public class UserService {
                 continue;
             }
             // iterate all "user id - totalScore" pairs for current session
-            for (Map.Entry<Long, Integer> entry : totalScoreByUserId.entrySet()) {
+            for (Map.Entry<Long, Integer> entry : normalizedTotalScoreByUserId.entrySet()) {
                 Long userId = entry.getKey();
                 Integer score = entry.getValue();
                 // if "user id - totalScore" pair invalid - skip
@@ -637,7 +659,9 @@ public class UserService {
                     : (int) Math.round((double) cumulativeRound / roundsPlayed);
 
             // set average scores and win values to user objects
+            user.setGamesPlayed(playedSessions);
             user.setGamesWon(sessionWins);
+            user.setGamesLost(Math.max(0, playedSessions - sessionWins));
             user.setRoundsWon(roundWinsByUserId.getOrDefault(userId, 0));
             user.setAverageScorePerSession(averageSession);
             user.setAverageScorePerRound(averageRound);

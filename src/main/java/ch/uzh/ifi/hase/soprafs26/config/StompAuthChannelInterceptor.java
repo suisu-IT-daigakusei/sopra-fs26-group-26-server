@@ -2,6 +2,7 @@ package ch.uzh.ifi.hase.soprafs26.config;
 
 import ch.uzh.ifi.hase.soprafs26.entity.User;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
+import ch.uzh.ifi.hase.soprafs26.service.WebSocketSessionTracker;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.MessagingException;
@@ -18,9 +19,12 @@ import java.util.Map;
 @Component
 public class StompAuthChannelInterceptor implements ChannelInterceptor {
     private final UserRepository userRepository;
+    private final WebSocketSessionTracker webSocketSessionTracker;
 
-    public StompAuthChannelInterceptor(UserRepository userRepository) {
+    public StompAuthChannelInterceptor(UserRepository userRepository,
+                                       WebSocketSessionTracker webSocketSessionTracker) {
         this.userRepository = userRepository;
+        this.webSocketSessionTracker = webSocketSessionTracker;
     }
 
     @Override
@@ -57,8 +61,60 @@ public class StompAuthChannelInterceptor implements ChannelInterceptor {
             // Set initial heartbeat
             user.setLastHeartbeat(Instant.now());
             userRepository.save(user);
+
+            String sessionId = accessor.getSessionId();
+            if (sessionId != null && !sessionId.isBlank()) {
+                webSocketSessionTracker.registerSession(user.getId(), sessionId);
+            }
         }
 
+        touchTrackedSession(accessor);
         return message;
+    }
+
+    private void touchTrackedSession(StompHeaderAccessor accessor) {
+        if (accessor == null) {
+            return;
+        }
+        String sessionId = accessor.getSessionId();
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        Long userId = extractUserId(accessor);
+        if (userId == null) {
+            return;
+        }
+        webSocketSessionTracker.touchSession(userId, sessionId);
+    }
+
+    private Long extractUserId(StompHeaderAccessor accessor) {
+        if (accessor == null) {
+            return null;
+        }
+        Map<String, Object> sessionAttributes = accessor.getSessionAttributes();
+        if (sessionAttributes != null) {
+            Object raw = sessionAttributes.get("userId");
+            if (raw instanceof Long userId) {
+                return userId;
+            }
+            if (raw instanceof Number number) {
+                return number.longValue();
+            }
+            if (raw instanceof String textId) {
+                try {
+                    return Long.parseLong(textId.trim());
+                } catch (NumberFormatException ignored) {
+                    // continue with principal fallback
+                }
+            }
+        }
+        if (accessor.getUser() != null) {
+            try {
+                return Long.parseLong(accessor.getUser().getName());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 }
