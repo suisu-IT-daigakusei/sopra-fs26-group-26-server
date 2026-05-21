@@ -71,15 +71,15 @@ public class ServerSettingsProperties {
 
     // Tiny TTL cache windows for repeated lookup helpers under reconnect storms.
     @Min(1)
-    private long playingLobbySnapshotCacheTtlMs = 400;
+    private long playingLobbySnapshotCacheTtlMs = 1500;
     @Min(1)
-    private long waitingLobbyLookupCacheTtlMs = 350;
+    private long waitingLobbyLookupCacheTtlMs = 1200;
     @Min(1)
     private int maxTransientLookupCacheEntries = 4096;
     @Min(1)
     private long authTokenLookupCacheTtlMs = 1500;
     @Min(1)
-    private long syncStateCacheTtlMs = 350;
+    private long syncStateCacheTtlMs = 1200;
     @Min(1)
     private long rematchDuplicateDecisionWindowMs = 900;
 
