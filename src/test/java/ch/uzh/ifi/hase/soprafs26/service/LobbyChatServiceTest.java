@@ -18,7 +18,9 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -250,5 +252,13 @@ public class LobbyChatServiceTest {
         lobby.setSpectatorIds(new ArrayList<>(spectatorIds));
         lobby.setChatCooldownSeconds(chatCooldownSeconds);
         Mockito.when(lobbyRepository.findBySessionId(sessionId)).thenReturn(lobby);
+
+        Set<Long> participants = new HashSet<>();
+        participants.addAll(playerIds);
+        participants.addAll(spectatorIds);
+        for (Long participantId : participants) {
+            Mockito.when(lobbyRepository.existsBySessionIdAndParticipantId(sessionId, participantId))
+                    .thenReturn(true);
+        }
     }
 }

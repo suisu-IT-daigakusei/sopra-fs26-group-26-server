@@ -35,4 +35,8 @@ public interface LobbyRepository extends JpaRepository<Lobby, Long> {
     @Query("select l from Lobby l where l.status = :status and "
             + "(:userId member of l.playerIds or :userId member of l.spectatorIds)")
     List<Lobby> findByStatusAndParticipantId(@Param("status") String status, @Param("userId") Long userId);
+
+    @Query("select case when count(l) > 0 then true else false end from Lobby l where l.sessionId = :sessionId and "
+            + "(:userId member of l.playerIds or :userId member of l.spectatorIds)")
+    boolean existsBySessionIdAndParticipantId(@Param("sessionId") String sessionId, @Param("userId") Long userId);
 }

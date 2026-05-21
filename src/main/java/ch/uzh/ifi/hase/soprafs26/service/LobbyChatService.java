@@ -42,7 +42,7 @@ public class LobbyChatService {
     public List<LobbyChatMessageDTO> getMessages(String token, String sessionId) {
         User user = requireUserByToken(token);
         Lobby lobby = requireLobbyBySessionId(sessionId);
-        verifyLobbyParticipant(lobby, user.getId());
+        verifyLobbyParticipant(lobby.getSessionId(), user.getId());
 
         SessionChatState state = getOrCreateStateForSession(lobby.getSessionId());
         synchronized (state) {
@@ -53,7 +53,7 @@ public class LobbyChatService {
     public LobbyChatMessageDTO sendMessage(String token, String sessionId, LobbyChatSendDTO request) {
         User user = requireUserByToken(token);
         Lobby lobby = requireLobbyBySessionId(sessionId);
-        verifyLobbyParticipant(lobby, user.getId());
+        verifyLobbyParticipant(lobby.getSessionId(), user.getId());
         String normalizedText = normalizeAndValidateText(request == null ? null : request.getMessage());
         long cooldownSeconds = resolveCooldownSeconds(lobby);
         Instant now = Instant.now();
@@ -141,13 +141,11 @@ public class LobbyChatService {
         return lobby;
     }
 
-    private void verifyLobbyParticipant(Lobby lobby, Long userId) {
-        if (lobby == null || userId == null) {
+    private void verifyLobbyParticipant(String sessionId, Long userId) {
+        if (sessionId == null || sessionId.isBlank() || userId == null) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not part of this lobby");
         }
-        boolean isPlayer = lobby.getPlayerIds() != null && lobby.getPlayerIds().contains(userId);
-        boolean isSpectator = lobby.getSpectatorIds() != null && lobby.getSpectatorIds().contains(userId);
-        if (!isPlayer && !isSpectator) {
+        if (!lobbyRepository.existsBySessionIdAndParticipantId(sessionId, userId)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not part of this lobby");
         }
     }

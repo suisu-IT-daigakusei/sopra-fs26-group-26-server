@@ -589,6 +589,19 @@ public class LobbyService {
         return playerIds;
     }
 
+    private Lobby initializeLobbyMembershipCollections(Lobby lobby) {
+        if (lobby == null) {
+            return null;
+        }
+        if (lobby.getPlayerIds() != null) {
+            lobby.getPlayerIds().size();
+        }
+        if (lobby.getSpectatorIds() != null) {
+            lobby.getSpectatorIds().size();
+        }
+        return lobby;
+    }
+
     public Optional<Lobby> findLatestPlayingLobbyForSpectator(Long userId) {
         if (userId == null) {
             return Optional.empty();
@@ -597,7 +610,8 @@ public class LobbyService {
                 .filter(lobby -> lobby != null
                         && lobby.getSpectatorIds() != null
                         && lobby.getSpectatorIds().contains(userId))
-                .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)));
+                .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)))
+                .map(this::initializeLobbyMembershipCollections);
     }
 
     public boolean isSpectatorInWaitingLobbyForPlayers(Long userId, List<Long> gamePlayerIds) {
@@ -627,7 +641,8 @@ public class LobbyService {
                 .filter(lobby -> lobby != null
                         && lobby.getPlayerIds() != null
                         && lobby.getPlayerIds().contains(userId))
-                .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)));
+                .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)))
+                .map(this::initializeLobbyMembershipCollections);
     }
 
     public Long findWebsocketGraceSecondsForUser(Long userId) {
@@ -1857,15 +1872,16 @@ public class LobbyService {
 
     // get lobby by id — used by WebSocketController
     public Lobby getLobbyById(Long lobbyId) {
-        return lobbyRepository.findById(lobbyId)
+        Lobby lobby = lobbyRepository.findById(lobbyId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Session could not be found!"));
+        return initializeLobbyMembershipCollections(lobby);
     }
 
     public Optional<Lobby> findLobbyById(Long lobbyId) {
         if (lobbyId == null) {
             return Optional.empty();
         }
-        return lobbyRepository.findById(lobbyId);
+        return lobbyRepository.findById(lobbyId).map(this::initializeLobbyMembershipCollections);
     }
 
     public Lobby getLobbyBySessionId(String sessionId) {
@@ -1873,7 +1889,7 @@ public class LobbyService {
         if (lobby == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session could not be found!");
         }
-        return lobby;
+        return initializeLobbyMembershipCollections(lobby);
     }
 
 
