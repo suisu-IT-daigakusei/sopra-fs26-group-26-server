@@ -33,6 +33,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 @Service
 @Transactional
@@ -599,6 +600,25 @@ public class LobbyService {
                 .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)));
     }
 
+    public boolean isSpectatorInWaitingLobbyForPlayers(Long userId, List<Long> gamePlayerIds) {
+        if (userId == null || gamePlayerIds == null || gamePlayerIds.isEmpty()) {
+            return false;
+        }
+        Set<Long> expectedPlayerSet = gamePlayerIds.stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (expectedPlayerSet.isEmpty()) {
+            return false;
+        }
+
+        return lobbyRepository.findByStatusAndParticipantId("WAITING", userId).stream()
+                .filter(lobby -> lobby != null
+                        && lobby.getSpectatorIds() != null
+                        && lobby.getSpectatorIds().contains(userId))
+                .anyMatch(lobby -> lobby.getPlayerIds() != null
+                        && new LinkedHashSet<>(lobby.getPlayerIds()).equals(expectedPlayerSet));
+    }
+
     public Optional<Lobby> findLatestPlayingLobbyForPlayer(Long userId) {
         if (userId == null) {
             return Optional.empty();
@@ -767,8 +787,11 @@ public class LobbyService {
             return cached.value;
         }
 
+        // Resolve by participant membership (player OR spectator) so rematch handoff
+        // can move spectators alongside players after ROUND_ENDED.
         String resolvedSessionId = findWaitingLobbiesForParticipant(userId).stream()
-                .filter(l -> l.getPlayerIds() != null && l.getPlayerIds().contains(userId))
+                .filter(l -> (l.getPlayerIds() != null && l.getPlayerIds().contains(userId))
+                        || (l.getSpectatorIds() != null && l.getSpectatorIds().contains(userId)))
                 .max(Comparator.comparing(Lobby::getId, Comparator.nullsLast(Long::compareTo)))
                 .map(Lobby::getSessionId)
                 .orElse(null);
@@ -1868,6 +1891,56 @@ public class LobbyService {
         }
         if (!spectatorIds.isEmpty()) {
             setUsersStatus(spectatorIds, UserStatus.ONLINE);
+        }
+    }
+
+    /**
+     * Logout safety cleanup:
+     * - removes user from all WAITING lobbies (player or spectator)
+     * - removes user only from spectator memberships in PLAYING lobbies
+     * Active PLAYING players are intentionally left untouched.
+     */
+    @Transactional
+    public void removeUserFromLobbiesForLogoutSafety(Long userId) {
+        if (userId == null) {
+            return;
+        }
+
+        List<Lobby> waitingMemberships = new ArrayList<>(lobbyRepository.findByStatusAndParticipantId("WAITING", userId));
+        for (Lobby waitingLobby : waitingMemberships) {
+            if (waitingLobby == null || waitingLobby.getSessionId() == null) {
+                continue;
+            }
+            removePlayerFromDisconnect(waitingLobby.getSessionId(), userId);
+        }
+
+        List<Lobby> playingMemberships = new ArrayList<>(lobbyRepository.findByStatusAndParticipantId("PLAYING", userId));
+        boolean updatedPlayingSpectatorMembership = false;
+        for (Lobby playingLobby : playingMemberships) {
+            if (playingLobby == null) {
+                continue;
+            }
+            if (playingLobby.getSpectatorIds() == null || !playingLobby.getSpectatorIds().contains(userId)) {
+                continue;
+            }
+
+            playingLobby.getSpectatorIds().remove(userId);
+            clearTimedOutPlayingFlag(userId);
+
+            boolean noPlayersRemain = playingLobby.getPlayerIds() == null || playingLobby.getPlayerIds().isEmpty();
+            if (noPlayersRemain) {
+                deleteLobbyAndReleaseSpectatorsIfAny(playingLobby);
+                updatedPlayingSpectatorMembership = true;
+                continue;
+            }
+
+            Lobby savedLobby = lobbyRepository.save(playingLobby);
+            lobbyEventPublisher.broadcastLobbyUpdate(savedLobby.getId(), savedLobby);
+            updatedPlayingSpectatorMembership = true;
+        }
+
+        if (updatedPlayingSpectatorMembership) {
+            onlineUsersEventPublisher.broadcastOnlineUsers();
         }
     }
     // remove player from lobby — self leave or host kick

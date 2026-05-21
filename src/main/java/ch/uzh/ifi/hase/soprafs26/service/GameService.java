@@ -725,7 +725,7 @@ public class GameService {
         }
     }
 
-    private GameSyncStateDTO buildSyncStatePayload(Game game, User viewer, boolean participant) {
+    private GameSyncStateDTO buildSyncStatePayload(Game game, User viewer, boolean participant, boolean spectator) {
         GameSyncStateDTO syncState = new GameSyncStateDTO();
         syncState.setStatus(game.getStatus() == null ? null : game.getStatus().name());
         syncState.setCurrentTurnUserId(game.getCurrentPlayerId());
@@ -748,7 +748,7 @@ public class GameService {
                 ? new ArrayList<>(game.getPlayerHands().getOrDefault(viewer.getId(), List.of()))
                 : List.of());
 
-        if (participant) {
+        if (participant || spectator) {
             syncState.setRematchDecisionSeconds(game.getRematchDecisionSeconds());
             if (game.getStatus() == GameStatus.ROUND_AWAITING_REMATCH || game.getStatus() == GameStatus.ROUND_ENDED) {
                 String waitingSessionId = lobbyService == null
@@ -777,12 +777,16 @@ public class GameService {
                 ? List.of()
                 : game.getOrderedPlayerIds();
         boolean participant = orderedPlayers.contains(viewer.getId());
-        boolean spectator = !participant && isSpectatorForPlayingLobby(orderedPlayers, viewer.getId());
+        boolean spectator = !participant && (
+                isSpectatorForPlayingLobby(orderedPlayers, viewer.getId())
+                        || (lobbyService != null
+                        && lobbyService.isSpectatorInWaitingLobbyForPlayers(viewer.getId(), orderedPlayers))
+        );
         if (!participant && !spectator) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed to view this game");
         }
 
-        GameSyncStateDTO syncState = buildSyncStatePayload(game, viewer, participant);
+        GameSyncStateDTO syncState = buildSyncStatePayload(game, viewer, participant, spectator);
         SyncStateSnapshot snapshot = new SyncStateSnapshot(syncState, computeSyncStateEtag(syncState));
         long ttlMs = resolveSyncStateCacheTtlMs();
         syncStateCacheByViewerAndGame.put(cacheKey, new CachedSyncState(snapshot, nowMs + ttlMs));
@@ -1683,7 +1687,16 @@ public class GameService {
     private String resolvePostRoundLobbySessionForToken(String gameId, String token) {
         User user = requireAuthenticatedUser(token);
         Game game = getGameById(gameId);
-        if (game.getOrderedPlayerIds() == null || !game.getOrderedPlayerIds().contains(user.getId())) {
+        List<Long> orderedPlayers = game.getOrderedPlayerIds() == null
+                ? List.of()
+                : game.getOrderedPlayerIds();
+        boolean participant = orderedPlayers.contains(user.getId());
+        boolean spectator = !participant && (
+                isSpectatorForPlayingLobby(orderedPlayers, user.getId())
+                        || (lobbyService != null
+                        && lobbyService.isSpectatorInWaitingLobbyForPlayers(user.getId(), orderedPlayers))
+        );
+        if (!participant && !spectator) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not a player in this game");
         }
         if (lobbyService == null) {

@@ -81,6 +81,9 @@ public class UserServiceTest {
 	@Mock
 	private DisconnectService disconnectService;
 
+    @Mock
+    private LobbyService lobbyService;
+
 	@InjectMocks
 	private UserService userService;
 
@@ -165,6 +168,7 @@ public class UserServiceTest {
 		userService.logoutUser("token");
 		
 		assertEquals(UserStatus.OFFLINE, user.getStatus());
+        verify(lobbyService, Mockito.times(1)).removeUserFromLobbiesForLogoutSafety(1L);
 		verify(userRepository, Mockito.times(1)).save(user);
 	}
 
@@ -184,6 +188,7 @@ public class UserServiceTest {
 
         ResponseStatusException ex = assertThrows(ResponseStatusException.class, () -> userService.logoutUser("token"));
         assertEquals(409, ex.getStatusCode().value());
+        verify(lobbyService, Mockito.never()).removeUserFromLobbiesForLogoutSafety(Mockito.anyLong());
         verify(userRepository, Mockito.never()).save(user);
     }
 
@@ -392,6 +397,7 @@ public class UserServiceTest {
         userService.logoutUser("t9");
         // log out worked 
         assertEquals(UserStatus.OFFLINE, userLogsOut.getStatus());
+        verify(lobbyService, Mockito.times(1)).removeUserFromLobbiesForLogoutSafety(9L);
         // logged out user was persisted
         verify(userRepository, Mockito.times(1)).save(userLogsOut);
     }

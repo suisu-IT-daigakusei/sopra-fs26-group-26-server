@@ -931,6 +931,10 @@ public class UserService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Cannot logout during an active game");
         }
 
+        if (lobbyService != null) {
+            lobbyService.removeUserFromLobbiesForLogoutSafety(foundUser.getId());
+        }
+
 		foundUser.setStatus(UserStatus.OFFLINE);
 		// this saves a random token to the user but the token is never revealed and no-one can use it
 		// acts as a safety feature s.t. a user that is logged out has no valid token saved in the DB
