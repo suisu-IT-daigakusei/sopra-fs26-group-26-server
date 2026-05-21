@@ -12,7 +12,9 @@ import java.util.List;
 public interface GameRepository extends JpaRepository<Game, String> {
     
     // find all active games a player is part of
-    @Query(value = "SELECT * FROM games WHERE CAST(ordered_player_ids AS VARCHAR) LIKE CONCAT('%', :playerId, '%')", nativeQuery = true)
+    @Query(value = "SELECT * FROM games WHERE status <> 'ROUND_ENDED' "
+            + "AND CAST(ordered_player_ids AS VARCHAR) LIKE CONCAT('%', :playerId, '%')",
+            nativeQuery = true)
     List<Game> findGamesByPlayerId(@Param("playerId") Long playerId);
     
 }

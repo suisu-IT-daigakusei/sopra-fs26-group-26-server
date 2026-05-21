@@ -14,10 +14,13 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPostDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPutDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.mapper.DTOMapper;
 import ch.uzh.ifi.hase.soprafs26.service.HistoryService;
+import ch.uzh.ifi.hase.soprafs26.service.HotEndpointRateLimiter;
 import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
 import ch.uzh.ifi.hase.soprafs26.service.UserService;
 import ch.uzh.ifi.hase.soprafs26.util.AuthValidationRules;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -44,16 +47,37 @@ public class UserController {
     private final HistoryService historyService;
     private final LobbyService lobbyService;
     private final UserRepository userRepository;
+    private final HotEndpointRateLimiter hotEndpointRateLimiter;
 
     public UserController(
             UserService userService,
             HistoryService historyService,
             LobbyService lobbyService,
             UserRepository userRepository) {
+        this(userService, historyService, lobbyService, userRepository, null);
+    }
+
+    @Autowired
+    public UserController(
+            UserService userService,
+            HistoryService historyService,
+            LobbyService lobbyService,
+            UserRepository userRepository,
+            HotEndpointRateLimiter hotEndpointRateLimiter) {
         this.userService = userService;
         this.historyService = historyService;
         this.lobbyService = lobbyService;
         this.userRepository = userRepository;
+        this.hotEndpointRateLimiter = hotEndpointRateLimiter;
+    }
+
+    private void enforceHotReadLimit(String endpointKey, String token, HttpServletRequest request) {
+        if (hotEndpointRateLimiter == null) {
+            return;
+        }
+        String forwardedForHeader = request == null ? null : request.getHeader("X-Forwarded-For");
+        String remoteAddress = request == null ? null : request.getRemoteAddr();
+        hotEndpointRateLimiter.enforceHotReadLimit(endpointKey, token, forwardedForHeader, remoteAddress);
     }
 
     private UserStatus normalizeVisibleStatus(UserStatus persistedStatus, UserStatus lobbyPresenceStatus) {
@@ -71,7 +95,8 @@ public class UserController {
     @GetMapping("/users")
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
-    public List<UserGetDTO> getAllUsers() {
+    public List<UserGetDTO> getAllUsers(HttpServletRequest request) {
+        enforceHotReadLimit("users-list", null, request);
         List<User> users = userService.getUsers();
         List<UserGetDTO> userGetDTOs = new ArrayList<>();
 
@@ -213,28 +238,38 @@ public class UserController {
     @GetMapping("/users/me/friends/ids")
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
-    public List<Long> getMyFriendIds(@RequestHeader("Authorization") String token) {
+    public List<Long> getMyFriendIds(@RequestHeader("Authorization") String token, HttpServletRequest request) {
+        enforceHotReadLimit("friend-ids", token, request);
         return userService.getAcceptedFriendIds(token);
     }
 
     @GetMapping("/users/me/friends/requests/incoming")
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
-    public List<FriendRequestIncomingDTO> getMyIncomingFriendRequests(@RequestHeader("Authorization") String token) {
+    public List<FriendRequestIncomingDTO> getMyIncomingFriendRequests(
+            @RequestHeader("Authorization") String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("friend-requests-incoming", token, request);
         return userService.getIncomingFriendRequests(token);
     }
 
     @GetMapping("/users/me/friends/requests/outgoing/ids")
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
-    public List<Long> getMyOutgoingPendingFriendRequestIds(@RequestHeader("Authorization") String token) {
+    public List<Long> getMyOutgoingPendingFriendRequestIds(
+            @RequestHeader("Authorization") String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("friend-requests-outgoing", token, request);
         return userService.getOutgoingPendingFriendRequestIds(token);
     }
 
     @GetMapping("/users/me/friends/online-summary")
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
-    public FriendOnlineSummaryDTO getMyFriendsOnlineSummary(@RequestHeader("Authorization") String token) {
+    public FriendOnlineSummaryDTO getMyFriendsOnlineSummary(
+            @RequestHeader("Authorization") String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("friends-online-summary", token, request);
         return userService.getFriendOnlineSummary(token);
     }
 

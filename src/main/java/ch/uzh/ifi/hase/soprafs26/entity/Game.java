@@ -16,7 +16,9 @@ import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 
 @Entity
 // create a table with name games in the DB
-@Table(name = "games" )
+@Table(name = "games", indexes = {
+        @Index(name = "idx_games_status", columnList = "status")
+})
 public class Game {
     
     @Id

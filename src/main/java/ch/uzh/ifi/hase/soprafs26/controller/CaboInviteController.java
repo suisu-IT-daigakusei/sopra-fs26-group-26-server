@@ -6,6 +6,9 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.CaboInvitePendingDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CaboInviteRespondDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CaboInviteSentDTO;
 import ch.uzh.ifi.hase.soprafs26.service.CaboInviteService;
+import ch.uzh.ifi.hase.soprafs26.service.HotEndpointRateLimiter;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,16 +18,34 @@ import java.util.List;
 public class CaboInviteController {
 
     private final CaboInviteService caboInviteService;
+    private final HotEndpointRateLimiter hotEndpointRateLimiter;
 
     public CaboInviteController(CaboInviteService caboInviteService) {
+        this(caboInviteService, null);
+    }
+
+    @Autowired
+    public CaboInviteController(CaboInviteService caboInviteService, HotEndpointRateLimiter hotEndpointRateLimiter) {
         this.caboInviteService = caboInviteService;
+        this.hotEndpointRateLimiter = hotEndpointRateLimiter;
+    }
+
+    private void enforceHotReadLimit(String endpointKey, String token, HttpServletRequest request) {
+        if (hotEndpointRateLimiter == null) {
+            return;
+        }
+        String forwardedForHeader = request == null ? null : request.getHeader("X-Forwarded-For");
+        String remoteAddress = request == null ? null : request.getRemoteAddr();
+        hotEndpointRateLimiter.enforceHotReadLimit(endpointKey, token, forwardedForHeader, remoteAddress);
     }
 
     /** Check pending invites */
     @GetMapping("/users/{userId}/invites")
     @ResponseStatus(HttpStatus.OK)
     public List<CaboInvitePendingDTO> getPending(@PathVariable Long userId,
-                                                 @RequestHeader("Authorization") String token) {
+                                                 @RequestHeader("Authorization") String token,
+                                                 HttpServletRequest request) {
+        enforceHotReadLimit("invites-pending", token, request);
         return caboInviteService.getPendingInvitesForUser(token, userId);
     }
 
@@ -32,7 +53,9 @@ public class CaboInviteController {
     @GetMapping("/users/{userId}/invites/sent")
     @ResponseStatus(HttpStatus.OK)
     public List<CaboInviteSentDTO> getSentForHost(@PathVariable Long userId,
-                                                  @RequestHeader("Authorization") String token) {
+                                                  @RequestHeader("Authorization") String token,
+                                                  HttpServletRequest request) {
+        enforceHotReadLimit("invites-sent", token, request);
         return caboInviteService.getSentInvitesForUser(token, userId);
     }
 

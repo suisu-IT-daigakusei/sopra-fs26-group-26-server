@@ -60,6 +60,7 @@ public class GameService {
     public static final String REMATCH_DECISION_FRESH = "FRESH";
     public static final String REMATCH_DECISION_NONE = "NONE";
     private static final long CACHE_CLEANUP_MIN_INTERVAL_MS = 1000L;
+    private static final long NO_PLAYING_LOBBY_FALLBACK_TTL_MS = 45000L;
 
     public static final class SyncStateSnapshot {
         private final GameSyncStateDTO payload;
@@ -147,6 +148,8 @@ public class GameService {
     private final AtomicLong lastSyncStateCacheCleanupMs = new AtomicLong(0L);
     private final Map<String, Long> rematchDecisionDedupUntilByKey = new ConcurrentHashMap<>();
     private final AtomicLong lastRematchDecisionDedupCleanupMs = new AtomicLong(0L);
+    private final Map<Long, Long> noPlayingLobbyFallbackUntilByUserId = new ConcurrentHashMap<>();
+    private final AtomicLong lastNoPlayingLobbyFallbackCleanupMs = new AtomicLong(0L);
 
     private Object getRematchResolutionLock(String gameId) {
         return rematchResolutionLocks.computeIfAbsent(gameId, ignored -> new Object());
@@ -762,6 +765,13 @@ public class GameService {
     @Transactional(readOnly = true)
     public SyncStateSnapshot getSyncStateSnapshotForToken(String gameId, String token) {
         User viewer = requireAuthenticatedUser(token);
+        long nowMs = System.currentTimeMillis();
+        String cacheKey = buildSyncStateCacheKey(gameId, viewer.getId());
+        CachedSyncState cachedSyncState = syncStateCacheByViewerAndGame.get(cacheKey);
+        if (cachedSyncState != null && cachedSyncState.expiresAtMs > nowMs && cachedSyncState.snapshot != null) {
+            return cachedSyncState.snapshot;
+        }
+
         Game game = getGameById(gameId);
         List<Long> orderedPlayers = game.getOrderedPlayerIds() == null
                 ? List.of()
@@ -770,13 +780,6 @@ public class GameService {
         boolean spectator = !participant && isSpectatorForPlayingLobby(orderedPlayers, viewer.getId());
         if (!participant && !spectator) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed to view this game");
-        }
-
-        long nowMs = System.currentTimeMillis();
-        String cacheKey = buildSyncStateCacheKey(gameId, viewer.getId());
-        CachedSyncState cachedSyncState = syncStateCacheByViewerAndGame.get(cacheKey);
-        if (cachedSyncState != null && cachedSyncState.expiresAtMs > nowMs && cachedSyncState.snapshot != null) {
-            return cachedSyncState.snapshot;
         }
 
         GameSyncStateDTO syncState = buildSyncStatePayload(game, viewer, participant);
@@ -1829,6 +1832,24 @@ public class GameService {
         return game != null && game.getStatus() != GameStatus.ROUND_ENDED;
     }
 
+    private void maybeCleanupNoPlayingLobbyFallbackCache(long nowMs) {
+        long previousCleanupMs = lastNoPlayingLobbyFallbackCleanupMs.get();
+        if (nowMs - previousCleanupMs < CACHE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastNoPlayingLobbyFallbackCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+        Iterator<Map.Entry<Long, Long>> iterator = noPlayingLobbyFallbackUntilByUserId.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Long, Long> entry = iterator.next();
+            Long expiresAtMs = entry.getValue();
+            if (expiresAtMs == null || expiresAtMs <= nowMs) {
+                iterator.remove();
+            }
+        }
+    }
+
     private Set<Long> toPlayerSet(List<Long> playerIds) {
         Set<Long> sanitized = new LinkedHashSet<>();
         if (playerIds == null) {
@@ -1898,16 +1919,42 @@ public class GameService {
         if (userId == null) {
             return Optional.empty();
         }
+
+        long nowMs = System.currentTimeMillis();
+
         if (lobbyService != null) {
             Optional<Lobby> playingLobbyForPlayer = Optional
                     .ofNullable(lobbyService.findLatestPlayingLobbyForPlayer(userId))
                     .orElse(Optional.empty());
             if (playingLobbyForPlayer.isPresent()) {
+                noPlayingLobbyFallbackUntilByUserId.remove(userId);
                 Optional<Game> activeByLobby = findActiveGameMatchingLobbyPlayers(playingLobbyForPlayer.get().getPlayerIds());
                 if (activeByLobby.isPresent()) {
                     return activeByLobby;
                 }
+                // Safety fallback only when a PLAYING lobby exists but game lookup mismatches.
+                // This keeps recovery behavior while avoiding global scans for users not in-game.
+                return gameRepository.findGamesByPlayerId(userId).stream()
+                        .filter(this::isActiveGame)
+                        .filter(game -> game.getOrderedPlayerIds() != null && game.getOrderedPlayerIds().contains(userId))
+                        .findFirst();
             }
+
+            Long skipUntilMs = noPlayingLobbyFallbackUntilByUserId.get(userId);
+            if (skipUntilMs != null && skipUntilMs > nowMs) {
+                return Optional.empty();
+            }
+            Optional<Game> fallbackResult = gameRepository.findGamesByPlayerId(userId).stream()
+                    .filter(this::isActiveGame)
+                    .filter(game -> game.getOrderedPlayerIds() != null && game.getOrderedPlayerIds().contains(userId))
+                    .findFirst();
+            if (fallbackResult.isEmpty()) {
+                noPlayingLobbyFallbackUntilByUserId.put(userId, nowMs + NO_PLAYING_LOBBY_FALLBACK_TTL_MS);
+                maybeCleanupNoPlayingLobbyFallbackCache(nowMs);
+            } else {
+                noPlayingLobbyFallbackUntilByUserId.remove(userId);
+            }
+            return fallbackResult;
         }
 
         return gameRepository.findGamesByPlayerId(userId).stream()

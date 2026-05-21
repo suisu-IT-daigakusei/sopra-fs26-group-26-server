@@ -31,6 +31,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.time.LocalDate;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * User Service
@@ -47,6 +48,7 @@ import java.time.LocalDate;
 @Transactional
 public class UserService {
     private static final long HEARTBEAT_WRITE_THROTTLE_SECONDS = 10;
+    private static final long RANKING_RECOMPUTE_MIN_INTERVAL_MS = 60000;
     private static final int MAX_BIO_LENGTH = 180;
     private static final List<String> CHARACTER_COLOR_ORDER = List.of(
             "navy_blue",
@@ -143,8 +145,9 @@ public class UserService {
 	private final UserRepository userRepository;
     private final LobbyRepository lobbyRepository;
     private final SessionRepository sessionRepository;
-	private final OnlineUsersEventPublisher onlineUsersEventPublisher;
+    private final OnlineUsersEventPublisher onlineUsersEventPublisher;
     private final DisconnectService disconnectService;
+    private final AtomicLong lastRankingRecomputeMs = new AtomicLong(0L);
     private final LobbyService lobbyService;
 
 	public UserService(@Qualifier("userRepository") UserRepository userRepository,
@@ -502,9 +505,24 @@ public class UserService {
     // holt alle user aus Datenbank und gibt sie dem controller
 	public List<User> getUsers() {
         List<User> users = this.userRepository.findAll();
-        recalculateGlobalRankingFromSessions(users);
+        maybeRecalculateGlobalRankingFromSessions(users);
 		return users;
 	}
+
+    private void maybeRecalculateGlobalRankingFromSessions(List<User> users) {
+        if (users == null || users.isEmpty()) {
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        long previousRecomputeMs = lastRankingRecomputeMs.get();
+        if (previousRecomputeMs > 0L && nowMs - previousRecomputeMs < RANKING_RECOMPUTE_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastRankingRecomputeMs.compareAndSet(previousRecomputeMs, nowMs)) {
+            return;
+        }
+        recalculateGlobalRankingFromSessions(users);
+    }
 
     // #102: global ranking 
     // gamesWon, averageScorePerSession - based on totalScore from ended sessions

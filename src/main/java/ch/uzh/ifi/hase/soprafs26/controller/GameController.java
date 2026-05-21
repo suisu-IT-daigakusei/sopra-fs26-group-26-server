@@ -106,7 +106,9 @@ public class GameController {
     @GetMapping("/games/active")
     @ResponseStatus(HttpStatus.OK)
     public Map<String, String> getActiveGameForCurrentUser(
-            @RequestHeader("Authorization") String token) {
+            @RequestHeader("Authorization") String token,
+            HttpServletRequest request) {
+        enforceHotReadLimit("active-game", token, request);
         return gameService.getActiveGameForToken(token)
                 .map(game -> {
                     Map<String, String> payload = new HashMap<>();
