@@ -1669,11 +1669,15 @@ public class GameService {
 
     public String completeRoundWithoutRematch(String gameId, String token) {
         submitRematchDecision(gameId, token, REMATCH_DECISION_NONE);
-        return getPostRoundLobbySessionForToken(gameId, token);
+        return resolvePostRoundLobbySessionForToken(gameId, token);
     }
 
     @Transactional(readOnly = true)
     public String getPostRoundLobbySessionForToken(String gameId, String token) {
+        return resolvePostRoundLobbySessionForToken(gameId, token);
+    }
+
+    private String resolvePostRoundLobbySessionForToken(String gameId, String token) {
         User user = requireAuthenticatedUser(token);
         Game game = getGameById(gameId);
         if (game.getOrderedPlayerIds() == null || !game.getOrderedPlayerIds().contains(user.getId())) {
@@ -1895,10 +1899,9 @@ public class GameService {
             return Optional.empty();
         }
         if (lobbyService != null) {
-            Optional<Lobby> playingLobbyForPlayer = lobbyService.findLatestPlayingLobbyForPlayer(userId);
-            if (playingLobbyForPlayer == null) {
-                playingLobbyForPlayer = Optional.empty();
-            }
+            Optional<Lobby> playingLobbyForPlayer = Optional
+                    .ofNullable(lobbyService.findLatestPlayingLobbyForPlayer(userId))
+                    .orElse(Optional.empty());
             if (playingLobbyForPlayer.isPresent()) {
                 Optional<Game> activeByLobby = findActiveGameMatchingLobbyPlayers(playingLobbyForPlayer.get().getPlayerIds());
                 if (activeByLobby.isPresent()) {
