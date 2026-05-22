@@ -12,7 +12,9 @@ import java.util.List;
 
 @Repository("gameRepository")
 public interface GameRepository extends JpaRepository<Game, String> {
-    @Query(value = "SELECT * FROM games WHERE status <> :excludedStatus "
+    @Query(value = "SELECT * FROM games WHERE "
+            + "REPLACE(CAST(status AS VARCHAR), ' ', '') <> :excludedStatusName "
+            + "AND REPLACE(CAST(status AS VARCHAR), ' ', '') <> :excludedStatusOrdinal "
             + "AND ("
             + "REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') = CONCAT('[', :playerId, ']') "
             + "OR REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') LIKE CONCAT('[', :playerId, ',%') "
@@ -21,7 +23,8 @@ public interface GameRepository extends JpaRepository<Game, String> {
             + ")",
             nativeQuery = true)
     List<Game> findGamesByPlayerIdExcludingStatus(@Param("playerId") Long playerId,
-                                                  @Param("excludedStatus") int excludedStatus);
+                                                   @Param("excludedStatusName") String excludedStatusName,
+                                                   @Param("excludedStatusOrdinal") String excludedStatusOrdinal);
 
     List<Game> findTop200ByStatusAndRoundEndedAtBeforeOrderByRoundEndedAtAsc(GameStatus status, Instant cutoff);
 
@@ -29,7 +32,11 @@ public interface GameRepository extends JpaRepository<Game, String> {
         if (playerId == null) {
             return List.of();
         }
-        return findGamesByPlayerIdExcludingStatus(playerId, GameStatus.ROUND_ENDED.ordinal());
+        return findGamesByPlayerIdExcludingStatus(
+                playerId,
+                GameStatus.ROUND_ENDED.name(),
+                String.valueOf(GameStatus.ROUND_ENDED.ordinal())
+        );
     }
     
 }

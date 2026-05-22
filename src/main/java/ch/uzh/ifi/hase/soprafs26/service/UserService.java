@@ -983,6 +983,7 @@ public class UserService {
         if (disconnectService != null) {
             disconnectService.cancelDisconnectTimer(foundUser.getId());
         }
+        onlineUsersEventPublisher.broadcastOnlineUsers();
 	}
 
 	public void heartbeat(String token) {
