@@ -1,15 +1,18 @@
 package ch.uzh.ifi.hase.soprafs26.config;
 
 import ch.uzh.ifi.hase.soprafs26.config.settings.ServerSettingsProperties;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.ChannelRegistration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.web.socket.config.annotation.*;
 
 @Configuration
 @EnableWebSocketMessageBroker
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
+    private static final long BROKER_HEARTBEAT_INTERVAL_MS = 20_000L;
     private final StompAuthChannelInterceptor stompAuthChannelInterceptor;
     private final ServerSettingsProperties serverSettings;
 
@@ -21,13 +24,15 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry registry) {
-        // Clients subscribe to topics here (server → client)
+        // Clients subscribe to topics here (server -> client)
         // queue is for private communication
-        registry.enableSimpleBroker("/topic", "/queue");
+        registry.enableSimpleBroker("/topic", "/queue")
+                .setTaskScheduler(websocketBrokerTaskScheduler())
+                .setHeartbeatValue(new long[]{BROKER_HEARTBEAT_INTERVAL_MS, BROKER_HEARTBEAT_INTERVAL_MS});
         
         // Prefix for messages sent FROM client TO server
         registry.setApplicationDestinationPrefixes("/app");
-        //for per-user messages
+        // for per-user messages
         registry.setUserDestinationPrefix("/user");
     }
 
@@ -64,4 +69,16 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                 .setSendBufferSizeLimit(serverSettings.getWebsocketSendBufferSizeLimitBytes())
                 .setMessageSizeLimit(serverSettings.getWebsocketMessageSizeLimitBytes());
     }
+
+    @Bean(name = "websocketBrokerTaskScheduler", destroyMethod = "shutdown")
+    public ThreadPoolTaskScheduler websocketBrokerTaskScheduler() {
+        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(Math.max(2, serverSettings.getWebsocketOutboundCorePoolSize()));
+        scheduler.setThreadNamePrefix("ws-broker-");
+        scheduler.setRemoveOnCancelPolicy(true);
+        scheduler.setWaitForTasksToCompleteOnShutdown(false);
+        scheduler.initialize();
+        return scheduler;
+    }
 }
+

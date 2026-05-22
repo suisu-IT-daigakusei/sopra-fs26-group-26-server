@@ -324,8 +324,11 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setStatus(GameStatus.ROUND_ACTIVE);
         game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
         game.setCurrentPlayerId(1L);
+        Lobby playingLobby = new Lobby();
+        playingLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
 
         Mockito.when(gameRepository.findGamesByPlayerId(2L)).thenReturn(List.of(game));
+        Mockito.when(lobbyService.findLatestPlayingLobbyForPlayer(2L)).thenReturn(Optional.of(playingLobby));
         Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
         Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
         Mockito.doNothing().when(gameRepository).flush();
@@ -343,8 +346,11 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setStatus(GameStatus.ROUND_ACTIVE);
         game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
         game.setCurrentPlayerId(2L);
+        Lobby playingLobby = new Lobby();
+        playingLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
 
         Mockito.when(gameRepository.findGamesByPlayerId(2L)).thenReturn(List.of(game));
+        Mockito.when(lobbyService.findLatestPlayingLobbyForPlayer(2L)).thenReturn(Optional.of(playingLobby));
         Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
         Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
         Mockito.doNothing().when(gameRepository).flush();
@@ -2221,6 +2227,17 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
                 .findGamesByPlayerIdExcludingStatus(Mockito.anyLong(), Mockito.anyString(), Mockito.anyString());
     }
 
+    @Test
+    void findActiveGameForUser_withoutPlayingLobby_doesNotRunFallbackGameScan() {
+        Long userId = 56L;
+        Mockito.when(lobbyService.findLatestPlayingLobbyForPlayer(userId)).thenReturn(Optional.empty());
+
+        Optional<Game> activeGame = gameService.findActiveGameForUser(userId);
+
+        assertTrue(activeGame.isEmpty(), "No PLAYING lobby should immediately resolve to no active game");
+        Mockito.verify(gameRepository, Mockito.never()).findGamesByPlayerId(userId);
+    }
+
     // tests that swapping a drawn card with a card in hand properly discards the swapped-out card face-up and hides the new card in hand, then advances the turn
     @Test
     public void moveSwapDrawnCard_validIndex_swapsCardsAndDiscardsFaceUp() {
@@ -3806,6 +3823,9 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         Game activeGame = new Game();
         activeGame.setStatus(GameStatus.ROUND_ACTIVE); // Triggers isActiveGame -> true
         activeGame.setOrderedPlayerIds(List.of(userId, 88L));
+        Lobby playingLobby = new Lobby();
+        playingLobby.setPlayerIds(List.of(userId, 88L));
+        Mockito.when(lobbyService.findLatestPlayingLobbyForPlayer(userId)).thenReturn(Optional.of(playingLobby));
 
         Mockito.when(gameRepository.findGamesByPlayerId(userId)).thenReturn(List.of(activeGame));
 

@@ -2165,18 +2165,12 @@ public class GameService {
                 return activeByUser;
             }
 
-            Optional<Game> fallbackResult = gameRepository.findGamesByPlayerId(userId).stream()
-                    .filter(this::isActiveGame)
-                    .filter(game -> game.getOrderedPlayerIds() != null && game.getOrderedPlayerIds().contains(userId))
-                    .findFirst();
-            if (fallbackResult.isEmpty()) {
-                noPlayingLobbyFallbackUntilByUserId.put(userId, nowMs + NO_PLAYING_LOBBY_FALLBACK_TTL_MS);
-                maybeCleanupNoPlayingLobbyFallbackCache(nowMs);
-            } else {
-                noPlayingLobbyFallbackUntilByUserId.remove(userId);
-                cacheActiveGameLookupForPlayers(fallbackResult.get(), nowMs);
-            }
-            return fallbackResult;
+            // No PLAYING lobby membership means this user has no active game context.
+            // Avoid a fallback global game scan here; that query becomes expensive as old
+            // game rows accumulate and is the main source of post-round degradation.
+            noPlayingLobbyFallbackUntilByUserId.put(userId, nowMs + NO_PLAYING_LOBBY_FALLBACK_TTL_MS);
+            maybeCleanupNoPlayingLobbyFallbackCache(nowMs);
+            return Optional.empty();
         }
 
         Optional<Game> fallbackWithoutLobbyService = gameRepository.findGamesByPlayerId(userId).stream()
