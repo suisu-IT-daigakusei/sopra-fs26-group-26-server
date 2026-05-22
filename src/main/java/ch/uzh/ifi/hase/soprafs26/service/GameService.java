@@ -45,6 +45,7 @@ import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import java.time.Instant;
@@ -64,6 +65,12 @@ public class GameService {
     private static final long ENDED_GAME_RETENTION_MS = 30L * 60L * 1000L;
     private static final long ENDED_GAME_CLEANUP_MIN_INTERVAL_MS = 60L * 1000L;
     private static final int ENDED_GAME_CLEANUP_MAX_BATCHES_PER_RUN = 5;
+    private static final long HOUSEKEEPING_FIXED_DELAY_MS = 60_000L;
+    private static final int MIN_TRANSIENT_CACHE_MAX_ENTRIES = 256;
+    private static final int AUTH_CACHE_ENTRY_MULTIPLIER = 2;
+    private static final int SYNC_CACHE_ENTRY_MULTIPLIER = 4;
+    private static final int REMATCH_DEDUP_CACHE_ENTRY_MULTIPLIER = 2;
+    private static final int NO_PLAYING_FALLBACK_CACHE_ENTRY_MULTIPLIER = 2;
 
     public static final class SyncStateSnapshot {
         private final GameSyncStateDTO payload;
@@ -434,7 +441,7 @@ public class GameService {
             newGame.setDeckApiId(deckId);
             newGame.setDrawPile(new ArrayList<>(converted));
         } catch (Exception ex) {
-            System.err.println("Deck API unavailable for startGame; using fallback deck: " + ex.getMessage());
+            log.warn("Deck API unavailable for startGame; using fallback deck: {}", ex.getMessage());
             // if api didnt work and we fallback, DeckApiId is null
             newGame.setDeckApiId(null);
             newGame.setDrawPile(buildFallbackDeck());
@@ -520,7 +527,7 @@ public class GameService {
             }
         } catch (Exception ex) {
             // if there was an error while talking to the api - fallback to Java's shuffle 
-            System.err.println("Deck API reshuffle failed; using Java's shuffle: " + ex.getMessage());
+            log.warn("Deck API reshuffle failed; using Java's shuffle: {}", ex.getMessage());
             Collections.shuffle(toPutIntoDrawPile);
             game.setDrawPile(toPutIntoDrawPile);
         }
@@ -568,6 +575,23 @@ public class GameService {
         return Math.max(1L, serverSettings.getRematchDuplicateDecisionWindowMs());
     }
 
+    private int resolveTransientCacheMaxEntries() {
+        return Math.max(MIN_TRANSIENT_CACHE_MAX_ENTRIES, serverSettings.getMaxTransientLookupCacheEntries());
+    }
+
+    private <K, V> void enforceCacheEntryCap(Map<K, V> cache, int maxEntries) {
+        if (cache == null || maxEntries <= 0) {
+            return;
+        }
+        while (cache.size() > maxEntries) {
+            K firstKey = cache.keySet().stream().findFirst().orElse(null);
+            if (firstKey == null) {
+                break;
+            }
+            cache.remove(firstKey);
+        }
+    }
+
     private String normalizeToken(String token) {
         return token == null ? "" : token.trim();
     }
@@ -611,6 +635,8 @@ public class GameService {
                 iterator.remove();
             }
         }
+        int maxEntries = resolveTransientCacheMaxEntries() * AUTH_CACHE_ENTRY_MULTIPLIER;
+        enforceCacheEntryCap(authenticatedUserByTokenCache, maxEntries);
     }
 
     private boolean isSpectatorForPlayingLobby(List<Long> orderedPlayers, Long userId) {
@@ -729,6 +755,8 @@ public class GameService {
                 iterator.remove();
             }
         }
+        int maxEntries = resolveTransientCacheMaxEntries() * SYNC_CACHE_ENTRY_MULTIPLIER;
+        enforceCacheEntryCap(syncStateCacheByViewerAndGame, maxEntries);
     }
 
     private GameSyncStateDTO buildSyncStatePayload(Game game, User viewer, boolean participant, boolean spectator) {
@@ -1320,7 +1348,7 @@ public class GameService {
                     completeAbilityPhaseAndAdvance(gameId, game, scheduledCount);
                 }
             } catch (Exception e) {
-                System.err.println("Ability timer failed for game " + gameId + ": " + e.getMessage());
+                log.error("Ability timer failed for game {}: {}", gameId, e.getMessage(), e);
             }
         }, delaySeconds, TimeUnit.SECONDS);
         gameTimers.put(gameId, future);
@@ -1614,6 +1642,8 @@ public class GameService {
                 iterator.remove();
             }
         }
+        int maxEntries = resolveTransientCacheMaxEntries() * REMATCH_DEDUP_CACHE_ENTRY_MULTIPLIER;
+        enforceCacheEntryCap(rematchDecisionDedupUntilByKey, maxEntries);
     }
 
     private boolean shouldSkipDuplicateRematchDecision(String gameId, Long userId, String normalizedDecision) {
@@ -1788,9 +1818,7 @@ public class GameService {
             // Keep the round state resolved even if post-round lobby transition races with concurrent cleanup.
             log.error("Failed to transition lobby after rematch resolution for game {}", gameId, e);
         } finally {
-            rematchDecisionTimerCounts.remove(gameId);
-            rematchResolutionLocks.remove(gameId);
-            abilityTimerCounts.remove(gameId);
+            clearGameScopedTransientState(gameId);
             maybeCleanupStaleEndedGames(System.currentTimeMillis());
         }
     }
@@ -1876,6 +1904,8 @@ public class GameService {
                 iterator.remove();
             }
         }
+        int maxEntries = resolveTransientCacheMaxEntries() * NO_PLAYING_FALLBACK_CACHE_ENTRY_MULTIPLIER;
+        enforceCacheEntryCap(noPlayingLobbyFallbackUntilByUserId, maxEntries);
     }
 
     private void maybeCleanupStaleEndedGames(long nowMs) {
@@ -1900,13 +1930,9 @@ public class GameService {
                     continue;
                 }
                 String staleGameId = staleGame.getId();
-                cancelTurnTimer(staleGameId);
-                rematchDecisionTimerCounts.remove(staleGameId);
-                rematchResolutionLocks.remove(staleGameId);
-                abilityTimerCounts.remove(staleGameId);
-                invalidateSyncStateCacheForGame(staleGameId);
+                clearGameScopedTransientState(staleGameId);
             }
-            gameRepository.deleteAll(staleEndedGames);
+            gameRepository.deleteAllInBatch(staleEndedGames);
 
             if (staleEndedGames.size() < 200) {
                 return;
@@ -2111,12 +2137,43 @@ public class GameService {
     }
 
 
+    @Scheduled(fixedDelay = HOUSEKEEPING_FIXED_DELAY_MS)
+    @Transactional
+    public void runHousekeepingJob() {
+        long nowMs = System.currentTimeMillis();
+        maybeCleanupAuthenticatedUserCache(nowMs);
+        maybeCleanupSyncStateCache(nowMs);
+        maybeCleanupRematchDecisionDedupCache(nowMs);
+        maybeCleanupNoPlayingLobbyFallbackCache(nowMs);
+        maybeCleanupStaleEndedGames(nowMs);
+    }
+
     private void invalidateSyncStateCacheForGame(String gameId) {
         if (gameId == null || gameId.isBlank()) {
             return;
         }
         String keyPrefix = gameId.trim() + "|";
         syncStateCacheByViewerAndGame.keySet().removeIf(key -> key != null && key.startsWith(keyPrefix));
+    }
+
+    private void clearRematchDecisionDedupEntriesForGame(String gameId) {
+        if (gameId == null || gameId.isBlank()) {
+            return;
+        }
+        String keyPrefix = gameId.trim() + "|";
+        rematchDecisionDedupUntilByKey.keySet().removeIf(key -> key != null && key.startsWith(keyPrefix));
+    }
+
+    private void clearGameScopedTransientState(String gameId) {
+        if (gameId == null || gameId.isBlank()) {
+            return;
+        }
+        cancelTurnTimer(gameId);
+        rematchDecisionTimerCounts.remove(gameId);
+        rematchResolutionLocks.remove(gameId);
+        abilityTimerCounts.remove(gameId);
+        clearRematchDecisionDedupEntriesForGame(gameId);
+        invalidateSyncStateCacheForGame(gameId);
     }
 
     // save in db and send filtered representations to all players 
@@ -2330,8 +2387,7 @@ public class GameService {
             applyHundredToFiftyReductionIfNeeded(players);
 
             if (isSessionOver) {
-                // didnt know what we want to do if game is over...
-                System.out.println("Session has reached its limit and is now over!");
+                log.info("Session has reached its configured round limit and is now over.");
             }
 
             game.setCaboRevealSeconds(resolveCaboRevealSecondsForPlayerCount(players));
@@ -2393,7 +2449,7 @@ public class GameService {
             try {
                 enterInitialPeekPhase(gameId);
             } catch (Exception e) {
-                System.err.println("Intro phase timer failed for game " + gameId + ": " + e.getMessage());
+                log.error("Intro phase timer failed for game {}: {}", gameId, e.getMessage(), e);
             }
         }, INTRO_PHASE_SECONDS, TimeUnit.SECONDS);
         gameTimers.put(gameId, future);
@@ -2424,7 +2480,7 @@ public class GameService {
                 executeTimoutMove(gameId, playerId);
             } catch (Exception e) {
                 // catch errors such that bug doesnt permanently crash timer
-                System.err.println("Timeout execution failed for game " + gameId + ": " + e.getMessage());
+                log.error("Timeout execution failed for game {}: {}", gameId, e.getMessage(), e);
             }
         }, game.getTurnSeconds(), TimeUnit.SECONDS);
         // save it to our tasks
@@ -2449,7 +2505,7 @@ public class GameService {
                     resolveRematchDecision(gameId, game, scheduledCount);
                 }
             } catch (Exception e) {
-                System.err.println("Rematch decision timer failed for game " + gameId + ": " + e.getMessage());
+                log.error("Rematch decision timer failed for game {}: {}", gameId, e.getMessage(), e);
             }
         }, gameAtScheduling.getRematchDecisionSeconds(), TimeUnit.SECONDS);
 
@@ -2471,7 +2527,7 @@ public class GameService {
                 }
                 enterRoundAwaitingRematchPhase(gameId, game);
             } catch (Exception e) {
-                System.err.println("Round reveal timer failed for game " + gameId + ": " + e.getMessage());
+                log.error("Round reveal timer failed for game {}: {}", gameId, e.getMessage(), e);
             }
         }, gameAtScheduling.getCaboRevealSeconds(), TimeUnit.SECONDS);
         gameTimers.put(gameId, future);
@@ -2784,14 +2840,14 @@ public class GameService {
             String sessionId = lobbyService.findPlayingSessionIdForPlayers(orderedPlayers);
 
             if (sessionId == null || sessionId.isBlank()) {
-                System.err.println("Warning: No active session found for game. Skipping score save.");
+                log.warn("No active session found for game {}; skipping round score save.", gameId);
                 return false;
             }
             
             Session session = sessionRepository.findBySessionId(sessionId);
 
             if (session == null) {
-                System.err.println("Warning: Session entity not found in DB. Skipping score save.");
+                log.warn("Session entity {} not found in DB; skipping round score save.", sessionId);
                 return false;
             }
 

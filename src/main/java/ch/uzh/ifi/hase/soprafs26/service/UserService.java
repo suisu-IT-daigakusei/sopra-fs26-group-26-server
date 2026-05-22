@@ -10,7 +10,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
-import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
 import ch.uzh.ifi.hase.soprafs26.entity.Session;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendOnlineSummaryDTO;
@@ -48,7 +47,8 @@ import java.util.concurrent.atomic.AtomicLong;
 @Transactional
 public class UserService {
     private static final long HEARTBEAT_WRITE_THROTTLE_SECONDS = 10;
-    private static final long RANKING_RECOMPUTE_MIN_INTERVAL_MS = 60000;
+    // Ranking aggregation scans all sessions; keep this coarse to avoid hot /users spikes under reconnect storms.
+    private static final long RANKING_RECOMPUTE_MIN_INTERVAL_MS = 300000;
     private static final int MAX_BIO_LENGTH = 180;
     private static final List<String> CHARACTER_COLOR_ORDER = List.of(
             "navy_blue",
@@ -233,9 +233,8 @@ public class UserService {
         if (userId == null || lobbyRepository == null) {
             return false;
         }
-        // check only players, not spectators 
-        return lobbyRepository.findByStatusAndParticipantId("PLAYING", userId).stream()
-                .anyMatch(lobby -> lobby.getPlayerIds() != null && lobby.getPlayerIds().contains(userId));
+        // check only players, not spectators
+        return lobbyRepository.existsByStatusAndPlayerId("PLAYING", userId);
     }
 
     private User requireAuthenticatedUser(String token) {
@@ -331,7 +330,7 @@ public class UserService {
         Set<Long> mySelections = toFriendIdSet(me);
         List<FriendRequestIncomingDTO> incoming = new ArrayList<>();
 
-        for (User candidate : userRepository.findAll()) {
+        for (User candidate : userRepository.findUsersWhoSelectedFriendId(myId)) {
             if (candidate == null || candidate.getId() == null) {
                 continue;
             }
@@ -657,32 +656,33 @@ public class UserService {
 
         
         List<User> ordered = new ArrayList<>(users);
+        Map<Long, Integer> computedGamesWonByUserId = new HashMap<>();
+        Map<Long, Integer> computedGamesPlayedByUserId = new HashMap<>();
+        Map<Long, Integer> computedGamesLostByUserId = new HashMap<>();
+        Map<Long, Integer> computedRoundsWonByUserId = new HashMap<>();
+        Map<Long, Integer> computedAverageSessionByUserId = new HashMap<>();
+        Map<Long, Integer> computedAverageRoundByUserId = new HashMap<>();
         // per user, calculate average scores (round and session based)
         // get win values (round and session based) from temporary maps
         for (User user : ordered) {
             Long userId = user.getId();
-            // if no values were added to the maps: return 0
             int sessionWins = sessionWinsByUserId.getOrDefault(userId, 0);
             int playedSessions = playedSessionsByUserId.getOrDefault(userId, 0);
             long cumulativeSession = cumulativeSessionScoreByUserId.getOrDefault(userId, 0L);
-            // if no sessions were played - set 0. otherwise calculate average
             int averageSession = playedSessions == 0 ? 0
                     : (int) Math.round((double) cumulativeSession / playedSessions);
 
-            // if no values were added to the maps: return 0
             int roundsPlayed = roundsPlayedByUserId.getOrDefault(userId, 0);
             long cumulativeRound = cumulativeRoundScoreByUserId.getOrDefault(userId, 0L);
-            // if no rounds were played - set 0. otherwise calculate average
             int averageRound = roundsPlayed == 0 ? 0
                     : (int) Math.round((double) cumulativeRound / roundsPlayed);
 
-            // set average scores and win values to user objects
-            user.setGamesPlayed(playedSessions);
-            user.setGamesWon(sessionWins);
-            user.setGamesLost(Math.max(0, playedSessions - sessionWins));
-            user.setRoundsWon(roundWinsByUserId.getOrDefault(userId, 0));
-            user.setAverageScorePerSession(averageSession);
-            user.setAverageScorePerRound(averageRound);
+            computedGamesWonByUserId.put(userId, sessionWins);
+            computedGamesPlayedByUserId.put(userId, playedSessions);
+            computedGamesLostByUserId.put(userId, Math.max(0, playedSessions - sessionWins));
+            computedRoundsWonByUserId.put(userId, roundWinsByUserId.getOrDefault(userId, 0));
+            computedAverageSessionByUserId.put(userId, averageSession);
+            computedAverageRoundByUserId.put(userId, averageRound);
         }
 
         // order users
@@ -691,21 +691,69 @@ public class UserService {
         // then by average score over sessions, ascending
         // then by ids, ascending
         ordered.sort(Comparator
-                .comparing(User::getGamesWon, Comparator.nullsFirst(Comparator.reverseOrder()))
+                .comparing(
+                        (User user) -> computedGamesWonByUserId.getOrDefault(user.getId(), 0),
+                        Comparator.reverseOrder())
                 .thenComparing(
-                        (User user) -> playedSessionsByUserId.getOrDefault(user.getId(), 0),
+                        (User user) -> computedGamesPlayedByUserId.getOrDefault(user.getId(), 0),
                         Comparator.reverseOrder()
                 )
-                .thenComparing(User::getAverageScorePerSession, Comparator.nullsFirst(Integer::compareTo))
+                .thenComparing(
+                        (User user) -> computedAverageSessionByUserId.getOrDefault(user.getId(), 0),
+                        Integer::compareTo)
                 .thenComparing(User::getId, Comparator.nullsFirst(Long::compareTo)));
 
         // calculate and assign ranks to users, based on the above sort order
         int rank = 1;
+        boolean anyUserChanged = false;
         for (User user : ordered) {
-            user.setOverallRank(rank++);
-            userRepository.save(user);
+            Long userId = user.getId();
+            int playedSessions = computedGamesPlayedByUserId.getOrDefault(userId, 0);
+            int sessionWins = computedGamesWonByUserId.getOrDefault(userId, 0);
+            int gamesLost = computedGamesLostByUserId.getOrDefault(userId, 0);
+            int roundsWon = computedRoundsWonByUserId.getOrDefault(userId, 0);
+            int averageSession = computedAverageSessionByUserId.getOrDefault(userId, 0);
+            int averageRound = computedAverageRoundByUserId.getOrDefault(userId, 0);
+
+            boolean changed = false;
+            if (!Objects.equals(user.getGamesPlayed(), playedSessions)) {
+                user.setGamesPlayed(playedSessions);
+                changed = true;
+            }
+            if (!Objects.equals(user.getGamesWon(), sessionWins)) {
+                user.setGamesWon(sessionWins);
+                changed = true;
+            }
+            if (!Objects.equals(user.getGamesLost(), gamesLost)) {
+                user.setGamesLost(gamesLost);
+                changed = true;
+            }
+            if (!Objects.equals(user.getRoundsWon(), roundsWon)) {
+                user.setRoundsWon(roundsWon);
+                changed = true;
+            }
+            if (!Objects.equals(user.getAverageScorePerSession(), averageSession)) {
+                user.setAverageScorePerSession(averageSession);
+                changed = true;
+            }
+            if (!Objects.equals(user.getAverageScorePerRound(), averageRound)) {
+                user.setAverageScorePerRound(averageRound);
+                changed = true;
+            }
+            if (!Objects.equals(user.getOverallRank(), rank)) {
+                user.setOverallRank(rank);
+                changed = true;
+            }
+
+            if (changed) {
+                userRepository.save(user);
+                anyUserChanged = true;
+            }
+            rank++;
         }
-        userRepository.flush();
+        if (anyUserChanged) {
+            userRepository.flush();
+        }
     }
 
 	public User createUser(User newUser) {
@@ -893,26 +941,17 @@ public class UserService {
             return UserStatus.ONLINE;
         }
 
-        // get playing lobby for this user
-        List<Lobby> playing = lobbyRepository.findByStatusAndParticipantId("PLAYING", userId);
-        if (!playing.isEmpty()) {
-            // there can be only 1 playing lobby for a user
-            Lobby l = playing.get(0);
-            // if in the list of players -> playing status
-            if (l.getPlayerIds() != null && l.getPlayerIds().contains(userId)) {
-                return UserStatus.PLAYING;
-            }
-            // else  -> spectating status
+        if (lobbyRepository.existsByStatusAndPlayerId("PLAYING", userId)) {
+            return UserStatus.PLAYING;
+        }
+        if (lobbyRepository.existsByStatusAndParticipantId("PLAYING", userId)) {
             return UserStatus.SPECTATING;
         }
 
-        // same logic as above but for waiting lobby
-        List<Lobby> waiting = lobbyRepository.findByStatusAndParticipantId("WAITING", userId);
-        if (!waiting.isEmpty()) {
-            Lobby l = waiting.get(0);
-            if (l.getPlayerIds() != null && l.getPlayerIds().contains(userId)) {
-                return UserStatus.LOBBY;
-            }
+        if (lobbyRepository.existsByStatusAndPlayerId("WAITING", userId)) {
+            return UserStatus.LOBBY;
+        }
+        if (lobbyRepository.existsByStatusAndParticipantId("WAITING", userId)) {
             return UserStatus.SPECTATING;
         }
 
@@ -951,9 +990,14 @@ public class UserService {
     	if (user == null) return;
         java.time.Instant now = java.time.Instant.now();
         java.time.Instant last = user.getLastHeartbeat();
-        UserStatus resolvedStatus = resolveStatusForLogin(user.getId());
-        boolean statusNeedsUpdate = user.getStatus() != resolvedStatus;
         boolean shouldSaveHeartbeat = last == null || now.isAfter(last.plusSeconds(HEARTBEAT_WRITE_THROTTLE_SECONDS));
+        boolean shouldResolveStatus = shouldSaveHeartbeat || user.getStatus() == null;
+        UserStatus resolvedStatus = user.getStatus() == null ? UserStatus.ONLINE : user.getStatus();
+        boolean statusNeedsUpdate = false;
+        if (shouldResolveStatus) {
+            resolvedStatus = resolveStatusForLogin(user.getId());
+            statusNeedsUpdate = user.getStatus() != resolvedStatus;
+        }
         boolean shouldPersist = shouldSaveHeartbeat || statusNeedsUpdate;
         if (shouldPersist) {
             if (shouldSaveHeartbeat) {

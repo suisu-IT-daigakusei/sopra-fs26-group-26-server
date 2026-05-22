@@ -12,8 +12,6 @@ import java.util.List;
 
 @Repository("gameRepository")
 public interface GameRepository extends JpaRepository<Game, String> {
-    
-    // find all active games a player is part of
     @Query(value = "SELECT * FROM games WHERE status <> :excludedStatus "
             + "AND ("
             + "REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') = CONCAT('[', :playerId, ']') "
@@ -28,6 +26,9 @@ public interface GameRepository extends JpaRepository<Game, String> {
     List<Game> findTop200ByStatusAndRoundEndedAtBeforeOrderByRoundEndedAtAsc(GameStatus status, Instant cutoff);
 
     default List<Game> findGamesByPlayerId(Long playerId) {
+        if (playerId == null) {
+            return List.of();
+        }
         return findGamesByPlayerIdExcludingStatus(playerId, GameStatus.ROUND_ENDED.ordinal());
     }
     

@@ -6,6 +6,8 @@ import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 import jakarta.annotation.PreDestroy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -17,17 +19,31 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 @Transactional
 public class DisconnectService {
+    private static final Logger log = LoggerFactory.getLogger(DisconnectService.class);
+
+    private static final class DisconnectTimerEntry {
+        private final long version;
+        private final ScheduledFuture<?> future;
+
+        private DisconnectTimerEntry(long version, ScheduledFuture<?> future) {
+            this.version = version;
+            this.future = future;
+        }
+    }
+
     private final UserRepository userRepository;
     private final LobbyService lobbyService;
     private final GameService gameService;
     private final TimeoutSettingsProperties timeoutSettings;
     private final WebSocketSessionTracker webSocketSessionTracker;
 
-    private final Map<Long, ScheduledFuture<?>> activeTimers = new ConcurrentHashMap<>();
+    private final Map<Long, DisconnectTimerEntry> activeTimers = new ConcurrentHashMap<>();
+    private final AtomicLong disconnectTimerVersionSequence = new AtomicLong(0L);
     private final ScheduledThreadPoolExecutor scheduler = createDisconnectScheduler();
 
     public DisconnectService(UserRepository userRepository,
@@ -80,25 +96,19 @@ public class DisconnectService {
         // In active games, do not fast-timeout on websocket disconnect alone (tab switch/background throttling).
         // AFK handling should follow the configured game AFK timer via heartbeat idle checks.
         if (lobbyService != null && lobbyService.isUserInActiveGame(userId)) {
-            cancelDisconnectTimer(userId);
             long websocketGraceSeconds = resolveWebsocketGraceSecondsForUser(userId);
-            ScheduledFuture<?> future = scheduler.schedule(() -> {
+            scheduleDisconnectTimer(userId, websocketGraceSeconds, () -> {
                 if (hasActiveWebSocketSession(userId)) {
                     return;
                 }
                 performPermanentRemoval(userId, "websocket_grace_active_game", websocketGraceSeconds);
-            }, websocketGraceSeconds, TimeUnit.SECONDS);
-            activeTimers.put(userId, future);
+            });
             return;
         }
-        cancelDisconnectTimer(userId);
         long websocketGraceSeconds = resolveWebsocketGraceSecondsForUser(userId);
-
-        ScheduledFuture<?> future = scheduler.schedule(() -> {
+        scheduleDisconnectTimer(userId, websocketGraceSeconds, () -> {
             performPermanentRemoval(userId, "websocket_grace", websocketGraceSeconds);
-        }, websocketGraceSeconds, TimeUnit.SECONDS);
-        
-        activeTimers.put(userId, future);
+        });
     }
 
     /**
@@ -111,6 +121,12 @@ public class DisconnectService {
         Set<Long> activeGameUserIds = lobbyService != null
                 ? lobbyService.getPlayingLobbyPlayerIdsSnapshot()
                 : Set.of();
+        Map<Long, Long> activeGameAfkTimeoutByUserId = lobbyService != null
+                ? lobbyService.getPlayingLobbyPlayerAfkTimeoutSecondsSnapshot()
+                : Map.of();
+        if (activeGameAfkTimeoutByUserId == null) {
+            activeGameAfkTimeoutByUserId = Map.of();
+        }
 
         Instant now = Instant.now();
         for (User user : users) {
@@ -127,7 +143,7 @@ public class DisconnectService {
             }
             boolean userInActiveGame = activeGameUserIds.contains(user.getId());
             long idleThresholdSeconds = userInActiveGame
-                    ? resolveIdleThresholdSecondsForUser(user.getId())
+                    ? resolveIdleThresholdSecondsForUser(user.getId(), activeGameAfkTimeoutByUserId.get(user.getId()))
                     : timeoutSettings.getIdleSeconds();
             Instant idleCutoff = now.minusSeconds(idleThresholdSeconds);
             if (!user.getLastHeartbeat().isBefore(idleCutoff)) {
@@ -142,16 +158,13 @@ public class DisconnectService {
         }
     }
 
-    private long resolveIdleThresholdSecondsForUser(Long userId) {
+    private long resolveIdleThresholdSecondsForUser(Long userId, Long lobbyAfkTimeoutSeconds) {
         long defaultIdle = timeoutSettings.getIdleSeconds();
+        if (lobbyAfkTimeoutSeconds != null && lobbyAfkTimeoutSeconds > 0) {
+            return lobbyAfkTimeoutSeconds;
+        }
         if (userId == null) {
             return defaultIdle;
-        }
-        if (lobbyService != null) {
-            Long lobbyAfkTimeout = lobbyService.findAfkTimeoutSecondsForUser(userId);
-            if (lobbyAfkTimeout != null && lobbyAfkTimeout > 0) {
-                return lobbyAfkTimeout;
-            }
         }
         if (gameService == null) {
             return defaultIdle;
@@ -234,9 +247,9 @@ public class DisconnectService {
     }
 
     public void cancelDisconnectTimer(Long userId) {
-        ScheduledFuture<?> future = activeTimers.remove(userId);
-        if (future != null) {
-            future.cancel(false);
+        DisconnectTimerEntry timerEntry = activeTimers.remove(userId);
+        if (timerEntry != null && timerEntry.future != null) {
+            timerEntry.future.cancel(false);
         }
     }
 
@@ -246,6 +259,32 @@ public class DisconnectService {
 
     private boolean hasActiveWebSocketSession(Long userId) {
         return webSocketSessionTracker.hasActiveSession(userId);
+    }
+
+    private void scheduleDisconnectTimer(Long userId, long delaySeconds, Runnable action) {
+        if (userId == null || action == null) {
+            return;
+        }
+        cancelDisconnectTimer(userId);
+        long safeDelaySeconds = Math.max(1L, delaySeconds);
+        long timerVersion = disconnectTimerVersionSequence.incrementAndGet();
+        ScheduledFuture<?> future = scheduler.schedule(() -> {
+            DisconnectTimerEntry current = activeTimers.get(userId);
+            if (current == null || current.version != timerVersion) {
+                return;
+            }
+            try {
+                action.run();
+            } finally {
+                activeTimers.compute(userId, (id, existing) -> {
+                    if (existing != null && existing.version == timerVersion) {
+                        return null;
+                    }
+                    return existing;
+                });
+            }
+        }, safeDelaySeconds, TimeUnit.SECONDS);
+        activeTimers.put(userId, new DisconnectTimerEntry(timerVersion, future));
     }
 
     public List<String> getTrackedWebSocketSessionIds(Long userId) {
@@ -311,12 +350,12 @@ public class DisconnectService {
             outcomeText = "timeout_handled_status_" + String.valueOf(updatedUser.getStatus()).toLowerCase();
         }
 
-        System.out.println(
-                "Timeout handling applied for user " + userId + " "
-                        + "[reason=" + reasonText
-                        + ", outcome=" + outcomeText
-                        + ", thresholdSeconds=" + thresholdSeconds
-                        + ", secondsSinceHeartbeat=" + heartbeatText
-                        + "].");
+        log.info(
+                "Timeout handling applied for user {} [reason={}, outcome={}, thresholdSeconds={}, secondsSinceHeartbeat={}].",
+                userId,
+                reasonText,
+                outcomeText,
+                thresholdSeconds,
+                heartbeatText);
     }
 }

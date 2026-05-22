@@ -133,13 +133,12 @@ class DisconnectServiceTest {
 
         when(userRepository.findByStatusNot(UserStatus.OFFLINE)).thenReturn(List.of(activeGameUser));
         when(lobbyService.getPlayingLobbyPlayerIdsSnapshot()).thenReturn(Set.of(82L));
-        when(lobbyService.findAfkTimeoutSecondsForUser(82L)).thenReturn(180L);
+        when(lobbyService.getPlayingLobbyPlayerAfkTimeoutSecondsSnapshot()).thenReturn(java.util.Map.of(82L, 180L));
         when(userRepository.findById(82L)).thenReturn(Optional.of(activeGameUser));
         when(lobbyService.isPlayerTimedOutInPlaying(82L)).thenReturn(false);
 
         disconnectService.checkIdleUsers();
 
-        verify(lobbyService).findAfkTimeoutSecondsForUser(82L);
         verify(gameService, never()).findActiveGameForUser(82L);
         verify(lobbyService).handlePermanentDisconnect(82L);
     }

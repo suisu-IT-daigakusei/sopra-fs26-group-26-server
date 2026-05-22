@@ -18,7 +18,11 @@ public class DeckOfCardsAPIService {
     private final RestTemplate restTemplate;
 
     public DeckOfCardsAPIService() {
-        this.restTemplate = new RestTemplate();
+        this(new RestTemplate());
+    }
+
+    DeckOfCardsAPIService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate == null ? new RestTemplate() : restTemplate;
     }
 
     // create a deck and get its id

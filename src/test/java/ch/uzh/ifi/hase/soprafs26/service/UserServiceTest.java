@@ -163,7 +163,7 @@ public class UserServiceTest {
 		user.setStatus(UserStatus.ONLINE);
 
 		when(userRepository.findByToken("token")).thenReturn(user);
-        when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L)).thenReturn(List.of());
+        when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 1L)).thenReturn(false);
 
 		userService.logoutUser("token");
 		
@@ -179,12 +179,8 @@ public class UserServiceTest {
         user.setToken("token");
         user.setStatus(UserStatus.PLAYING);
 
-        Lobby playingLobby = new Lobby();
-        playingLobby.setStatus("PLAYING");
-        playingLobby.setPlayerIds(List.of(7L, 8L));
-
         when(userRepository.findByToken("token")).thenReturn(user);
-        when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 7L)).thenReturn(List.of(playingLobby));
+        when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 7L)).thenReturn(true);
 
         ResponseStatusException ex = assertThrows(ResponseStatusException.class, () -> userService.logoutUser("token"));
         assertEquals(409, ex.getStatusCode().value());
@@ -286,8 +282,10 @@ public class UserServiceTest {
         existing.setStatus(UserStatus.OFFLINE);
 
         when(userRepository.findByUsername("trimUser")).thenReturn(existing);
-        when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 77L)).thenReturn(List.of());
-        when(lobbyRepository.findByStatusAndParticipantId("WAITING", 77L)).thenReturn(List.of());
+        when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 77L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 77L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndPlayerId("WAITING", 77L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndParticipantId("WAITING", 77L)).thenReturn(false);
 
         User loggedIn = userService.loginUser("  trimUser  ", "ValidPass#1");
 
@@ -303,11 +301,13 @@ public class UserServiceTest {
         user.setId(10L);
         user.setToken("token-online");
         user.setStatus(UserStatus.OFFLINE);
-        user.setLastHeartbeat(Instant.now());
+        user.setLastHeartbeat(null);
 
         when(userRepository.findByToken("token-online")).thenReturn(user);
-        when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 10L)).thenReturn(List.of());
-        when(lobbyRepository.findByStatusAndParticipantId("WAITING", 10L)).thenReturn(List.of());
+        when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 10L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 10L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndPlayerId("WAITING", 10L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndParticipantId("WAITING", 10L)).thenReturn(false);
 
         userService.heartbeat("token-online");
 
@@ -323,13 +323,12 @@ public class UserServiceTest {
         user.setId(11L);
         user.setToken("token-lobby");
         user.setStatus(UserStatus.OFFLINE);
-        user.setLastHeartbeat(Instant.now());
+        user.setLastHeartbeat(null);
 
         when(userRepository.findByToken("token-lobby")).thenReturn(user);
-        when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 11L)).thenReturn(List.of());
-        Lobby waitingLobby = new Lobby();
-        waitingLobby.setPlayerIds(List.of(11L, 1L));
-        when(lobbyRepository.findByStatusAndParticipantId("WAITING", 11L)).thenReturn(List.of(waitingLobby));
+        when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 11L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 11L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndPlayerId("WAITING", 11L)).thenReturn(true);
 
         userService.heartbeat("token-lobby");
 
@@ -345,12 +344,10 @@ public class UserServiceTest {
         user.setId(12L);
         user.setToken("token-playing");
         user.setStatus(UserStatus.OFFLINE);
-        user.setLastHeartbeat(Instant.now());
+        user.setLastHeartbeat(null);
 
         when(userRepository.findByToken("token-playing")).thenReturn(user);
-        Lobby playingLobby = new Lobby();
-        playingLobby.setPlayerIds(List.of(12L, 1L));
-        when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 12L)).thenReturn(List.of(playingLobby));
+        when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 12L)).thenReturn(true);
 
         userService.heartbeat("token-playing");
 
@@ -369,15 +366,11 @@ public class UserServiceTest {
         user.setToken("t13");
         user.setStatus(UserStatus.OFFLINE);
 
-        Lobby waitingLobby = new Lobby();
-        waitingLobby.setPlayerIds(List.of(1L));
-        waitingLobby.setSpectatorIds(new ArrayList<>(List.of(13L)));
-
         when(userRepository.findByToken("t13")).thenReturn(user);
-        // return empty list for playing lobbies and user with id 13
-        when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 13L)).thenReturn(List.of());
-        // return the waiting lobby for same user
-        when(lobbyRepository.findByStatusAndParticipantId("WAITING", 13L)).thenReturn(List.of(waitingLobby));
+        when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 13L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 13L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndPlayerId("WAITING", 13L)).thenReturn(false);
+        when(lobbyRepository.existsByStatusAndParticipantId("WAITING", 13L)).thenReturn(true);
         // heartbeat will set the SPECTATING status based on id
         userService.heartbeat("t13");
         assertEquals(UserStatus.SPECTATING, user.getStatus());
@@ -387,12 +380,8 @@ public class UserServiceTest {
         userLogsOut.setToken("t9");
         userLogsOut.setStatus(UserStatus.SPECTATING);
 
-        Lobby playingLobby = new Lobby();
-        playingLobby.setPlayerIds(List.of(1L, 2L));
-        playingLobby.setSpectatorIds(new ArrayList<>(List.of(9L)));
-
         when(userRepository.findByToken("t9")).thenReturn(userLogsOut);
-        when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 9L)).thenReturn(List.of(playingLobby));
+        when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 9L)).thenReturn(false);
         // log out spectator 
         userService.logoutUser("t9");
         // log out worked 
@@ -702,13 +691,9 @@ public class UserServiceTest {
         outgoingOnly.setUsername("charlie");
         outgoingOnly.setFriendUserIds(new ArrayList<>());
 
-        User unrelated = new User();
-        unrelated.setId(5L);
-        unrelated.setUsername("dora");
-        unrelated.setFriendUserIds(new ArrayList<>(List.of(9L)));
-
         when(userRepository.findByToken("token")).thenReturn(me);
-        when(userRepository.findAll()).thenReturn(List.of(requesterB, outgoingOnly, unrelated, requesterA, me));
+        when(userRepository.findUsersWhoSelectedFriendId(1L))
+                .thenReturn(List.of(requesterB, outgoingOnly, requesterA, me));
 
         List<FriendRequestIncomingDTO> incoming = userService.getIncomingFriendRequests("token");
 

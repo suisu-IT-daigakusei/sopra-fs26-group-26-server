@@ -2,7 +2,9 @@ package ch.uzh.ifi.hase.soprafs26.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -81,8 +83,8 @@ public class MoveServiceTest {
         // mock repository return values
         when(userRepository.findByToken(TOKEN_REQUESTER)).thenReturn(requester);
         when(sessionRepository.findBySessionId(SESSION_ID)).thenReturn(session);
-        when(moveRepository.findBySessionIdOrderByTimestampAsc(SESSION_ID))
-                .thenReturn(List.of(ownPrivateMove, ownPublicMove, opponentPublicMove, opponentPrivateMove));
+        when(moveRepository.findTop500BySessionIdOrderByTimestampDesc(SESSION_ID))
+                .thenReturn(List.of(opponentPrivateMove, opponentPublicMove, ownPublicMove, ownPrivateMove));
 
         User opponent = new User();
         opponent.setId(2L);
@@ -144,5 +146,20 @@ public class MoveServiceTest {
                 () -> moveService.getSessionLog(SESSION_ID, "token-outsider"));
         // validate exception code
         assertEquals(403, forbidden.getStatusCode().value());
+    }
+
+    @Test
+    public void cleanupStaleSessionMovesJob_deletesMovesForOldEndedSessions() {
+        Session staleEnded = new Session();
+        staleEnded.setSessionId("old-session");
+        staleEnded.setEnded(true);
+        staleEnded.setStartTime(Instant.now().minusSeconds(60L * 60L * 30L));
+
+        when(sessionRepository.findTop200ByIsEndedTrueAndStartTimeBeforeOrderByStartTimeAsc(any()))
+                .thenReturn(List.of(staleEnded));
+
+        moveService.cleanupStaleSessionMovesJob();
+
+        verify(moveRepository).deleteAllBySessionIdsBulk(List.of("old-session"));
     }
 }

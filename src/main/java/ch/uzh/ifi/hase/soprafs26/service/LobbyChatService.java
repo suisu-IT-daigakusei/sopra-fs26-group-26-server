@@ -8,16 +8,19 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbyChatMessageDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbyChatSendDTO;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class LobbyChatService {
@@ -25,11 +28,16 @@ public class LobbyChatService {
     public static final int MAX_MESSAGE_LENGTH = 50;
     private static final int MAX_HISTORY_MESSAGES = 200;
     private static final long DEFAULT_CHAT_COOLDOWN_SECONDS = 3L;
+    private static final long LAST_SENT_TRACK_RETENTION_SECONDS = 1800L;
+    private static final long CHAT_STATE_CACHE_CLEANUP_MIN_INTERVAL_MS = 30_000L;
+    private static final long CHAT_STATE_INACTIVE_TTL_MS = 2L * 60L * 60L * 1000L;
+    private static final int CHAT_STATE_MAX_SESSIONS = 1024;
 
     private final LobbyRepository lobbyRepository;
     private final UserRepository userRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final ConcurrentHashMap<String, SessionChatState> chatStateBySessionId = new ConcurrentHashMap<>();
+    private final AtomicLong lastChatStateCleanupMs = new AtomicLong(0L);
 
     public LobbyChatService(LobbyRepository lobbyRepository,
                             UserRepository userRepository,
@@ -46,6 +54,9 @@ public class LobbyChatService {
 
         SessionChatState state = getOrCreateStateForSession(lobby.getSessionId());
         synchronized (state) {
+            Instant now = Instant.now();
+            pruneLastSentTracker(state, now);
+            state.touch(System.currentTimeMillis());
             return copyMessages(state.history);
         }
     }
@@ -61,6 +72,8 @@ public class LobbyChatService {
         SessionChatState state = getOrCreateStateForSession(lobby.getSessionId());
         LobbyChatMessageDTO outgoingMessage;
         synchronized (state) {
+            pruneLastSentTracker(state, now);
+            state.touch(System.currentTimeMillis());
             Instant previousMessageAt = state.lastSentAtByUserId.get(user.getId());
             if (previousMessageAt != null) {
                 long elapsedMillis = Duration.between(previousMessageAt, now).toMillis();
@@ -94,6 +107,18 @@ public class LobbyChatService {
         return outgoingMessage;
     }
 
+    private void pruneLastSentTracker(SessionChatState state, Instant now) {
+        if (state == null || now == null) {
+            return;
+        }
+        Instant cutoff = now.minusSeconds(LAST_SENT_TRACK_RETENTION_SECONDS);
+        state.lastSentAtByUserId.entrySet().removeIf(entry ->
+                entry == null
+                        || entry.getKey() == null
+                        || entry.getValue() == null
+                        || entry.getValue().isBefore(cutoff));
+    }
+
     public void clearSessionMessages(String sessionId) {
         String normalizedSessionId = normalizeSessionId(sessionId);
         if (normalizedSessionId == null) {
@@ -107,7 +132,48 @@ public class LobbyChatService {
         if (normalizedSessionId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing session id");
         }
-        return chatStateBySessionId.computeIfAbsent(normalizedSessionId, ignored -> new SessionChatState());
+        long nowMs = System.currentTimeMillis();
+        maybeCleanupSessionStateCache(nowMs);
+        SessionChatState state = chatStateBySessionId.computeIfAbsent(normalizedSessionId, ignored -> new SessionChatState());
+        state.touch(nowMs);
+        return state;
+    }
+
+    @Scheduled(fixedDelay = 60000)
+    public void cleanupStaleSessionChatStateJob() {
+        maybeCleanupSessionStateCache(System.currentTimeMillis());
+    }
+
+    private void maybeCleanupSessionStateCache(long nowMs) {
+        long previousCleanupMs = lastChatStateCleanupMs.get();
+        if (nowMs - previousCleanupMs < CHAT_STATE_CACHE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastChatStateCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+
+        long staleCutoffMs = nowMs - CHAT_STATE_INACTIVE_TTL_MS;
+        chatStateBySessionId.entrySet().removeIf(entry -> {
+            if (entry == null || entry.getKey() == null || entry.getValue() == null) {
+                return true;
+            }
+            SessionChatState state = entry.getValue();
+            return state.getLastTouchedAtMs() < staleCutoffMs;
+        });
+
+        int overflowEntries = chatStateBySessionId.size() - CHAT_STATE_MAX_SESSIONS;
+        if (overflowEntries <= 0) {
+            return;
+        }
+        List<Map.Entry<String, SessionChatState>> oldestEntries = chatStateBySessionId.entrySet().stream()
+                .filter(entry -> entry != null && entry.getKey() != null && entry.getValue() != null)
+                .sorted(Comparator.comparingLong(entry -> entry.getValue().getLastTouchedAtMs()))
+                .limit(overflowEntries)
+                .toList();
+        for (Map.Entry<String, SessionChatState> oldestEntry : oldestEntries) {
+            chatStateBySessionId.remove(oldestEntry.getKey());
+        }
     }
 
     private String normalizeSessionId(String sessionId) {
@@ -209,7 +275,16 @@ public class LobbyChatService {
 
     private static class SessionChatState {
         private long sequence = 0L;
+        private volatile long lastTouchedAtMs = System.currentTimeMillis();
         private final List<LobbyChatMessageDTO> history = new ArrayList<>();
         private final Map<Long, Instant> lastSentAtByUserId = new HashMap<>();
+
+        private void touch(long nowMs) {
+            this.lastTouchedAtMs = nowMs;
+        }
+
+        private long getLastTouchedAtMs() {
+            return lastTouchedAtMs;
+        }
     }
 }

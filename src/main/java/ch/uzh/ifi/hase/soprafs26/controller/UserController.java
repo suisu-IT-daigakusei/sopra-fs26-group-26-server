@@ -104,11 +104,16 @@ public class UserController {
                 .map(User::getId)
                 .filter(id -> id != null)
                 .toList();
-        Map<Long, String> joinableSessionIdByUserId = lobbyService.resolveJoinableSessionIdsForUsers(userIds);
+        LobbyService.LobbyPresenceLookupResult presenceLookup =
+                lobbyService.resolveJoinableSessionsAndPresenceForUsers(userIds);
+        if (presenceLookup == null) {
+            presenceLookup = new LobbyService.LobbyPresenceLookupResult(Map.of(), Map.of());
+        }
+        Map<Long, String> joinableSessionIdByUserId = presenceLookup.joinableSessionIdByUserId();
         if (joinableSessionIdByUserId == null) {
             joinableSessionIdByUserId = Map.of();
         }
-        Map<Long, UserStatus> lobbyPresenceStatusByUserId = lobbyService.resolveLobbyPresenceStatusForUsers(userIds);
+        Map<Long, UserStatus> lobbyPresenceStatusByUserId = presenceLookup.statusByUserId();
         if (lobbyPresenceStatusByUserId == null) {
             lobbyPresenceStatusByUserId = Map.of();
         }

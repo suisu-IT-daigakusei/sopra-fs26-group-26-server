@@ -4,7 +4,9 @@ import ch.uzh.ifi.hase.soprafs26.config.settings.ServerSettingsProperties;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
+import java.util.Comparator;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -14,6 +16,7 @@ public class HotEndpointRateLimiter {
 
     private static final long CLEANUP_INTERVAL_MS = 30000L;
     private static final double MIN_REFILL_TOKENS_PER_SECOND = 0.1d;
+    private static final int MAX_BUCKET_ENTRY_MULTIPLIER = 4;
 
     private static final class TokenBucketState {
         private double tokens;
@@ -186,6 +189,21 @@ public class HotEndpointRateLimiter {
             if (lastAcceptedMs <= 0L || nowMs - lastAcceptedMs > staleEntryMs) {
                 iterator.remove();
             }
+        }
+
+        int maxEntries = Math.max(512, serverSettings.getMaxTransientLookupCacheEntries() * MAX_BUCKET_ENTRY_MULTIPLIER);
+        int overflowEntries = tokenBucketByKey.size() - maxEntries;
+        if (overflowEntries <= 0) {
+            return;
+        }
+
+        List<Map.Entry<String, TokenBucketState>> oldestEntries = tokenBucketByKey.entrySet().stream()
+                .filter(entry -> entry != null && entry.getKey() != null && entry.getValue() != null)
+                .sorted(Comparator.comparingLong(entry -> entry.getValue().lastAcceptedEpochMs))
+                .limit(overflowEntries)
+                .toList();
+        for (Map.Entry<String, TokenBucketState> oldestEntry : oldestEntries) {
+            tokenBucketByKey.remove(oldestEntry.getKey());
         }
     }
 }

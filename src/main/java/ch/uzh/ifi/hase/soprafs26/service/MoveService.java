@@ -1,15 +1,19 @@
 package ch.uzh.ifi.hase.soprafs26.service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.context.event.EventListener;
 
@@ -24,10 +28,15 @@ import ch.uzh.ifi.hase.soprafs26.entity.PlayerActionEvent;
 
 @Service
 public class MoveService {
+    private static final int MAX_SESSION_LOG_MOVES = 500;
+    private static final long STALE_MOVE_CLEANUP_MIN_INTERVAL_MS = 30_000L;
+    private static final long ENDED_SESSION_MOVE_RETENTION_HOURS = 24L;
+    private static final int STALE_MOVE_CLEANUP_MAX_BATCHES_PER_RUN = 5;
 
     private final MoveRepository moveRepository;
     private final SessionRepository sessionRepository;
     private final UserRepository userRepository;
+    private final AtomicLong lastMoveCleanupMs = new AtomicLong(0L);
 
     public MoveService(MoveRepository moveRepository,
                        SessionRepository sessionRepository,
@@ -57,8 +66,10 @@ public class MoveService {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not a participant of this session");
         }
 
-        // order by timestamp ascending
-        List<Move> chronologicalMoves = moveRepository.findBySessionIdOrderByTimestampAsc(sessionId);
+        // load only the newest log window and return it in chronological order
+        List<Move> recentMovesDesc = moveRepository.findTop500BySessionIdOrderByTimestampDesc(sessionId);
+        List<Move> chronologicalMoves = new ArrayList<>(recentMovesDesc == null ? List.of() : recentMovesDesc);
+        Collections.reverse(chronologicalMoves);
 
         // create a list of all public moves and a set of their user ids
         List<Move> visibleMoves = new ArrayList<>();
@@ -117,5 +128,47 @@ public class MoveService {
         }
         move.setIsPublic(isPublic);
         moveRepository.save(move);
+    }
+
+    @Scheduled(fixedDelay = 60000)
+    public void cleanupStaleSessionMovesJob() {
+        maybeCleanupStaleSessionMoves();
+    }
+
+    @Transactional
+    void maybeCleanupStaleSessionMoves() {
+        long nowMs = System.currentTimeMillis();
+        long previousCleanupMs = lastMoveCleanupMs.get();
+        if (nowMs - previousCleanupMs < STALE_MOVE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastMoveCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+
+        Instant cutoff = Instant.now().minusSeconds(ENDED_SESSION_MOVE_RETENTION_HOURS * 3600L);
+        for (int batch = 0; batch < STALE_MOVE_CLEANUP_MAX_BATCHES_PER_RUN; batch++) {
+            List<Session> staleEndedSessions = sessionRepository
+                    .findTop200ByIsEndedTrueAndStartTimeBeforeOrderByStartTimeAsc(cutoff);
+            if (staleEndedSessions == null || staleEndedSessions.isEmpty()) {
+                return;
+            }
+
+            List<String> staleSessionIds = new ArrayList<>();
+            for (Session session : staleEndedSessions) {
+                if (session == null || session.getSessionId() == null || session.getSessionId().isBlank()) {
+                    continue;
+                }
+                staleSessionIds.add(session.getSessionId());
+            }
+
+            if (!staleSessionIds.isEmpty()) {
+                moveRepository.deleteAllBySessionIdsBulk(staleSessionIds);
+            }
+
+            if (staleEndedSessions.size() < 200) {
+                return;
+            }
+        }
     }
 }

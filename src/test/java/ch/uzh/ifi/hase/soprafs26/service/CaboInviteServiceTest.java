@@ -113,7 +113,7 @@ public class CaboInviteServiceTest {
         waitingLobby.setId(lobbyId);
         Mockito.when(lobbyService.requireWaitingLobbyForHost(hostId)).thenReturn(waitingLobby);
 
-        Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(new ArrayList<>());
+        Mockito.when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", inviteeId)).thenReturn(false);
 
         Mockito.when(caboInviteRepository.findByFromUserIdAndLobbyIdOrderByCreatedAtDesc(hostId, lobbyId))
                 .thenReturn(new ArrayList<>());
@@ -174,11 +174,8 @@ public class CaboInviteServiceTest {
         waitingLobby.setId(100L);
         Mockito.when(lobbyService.requireWaitingLobbyForHost(hostId)).thenReturn(waitingLobby);
 
-        // Guard Condition: Mock a playing lobby that contains our target inviteeId
-        Lobby activeLobby = new Lobby();
-        activeLobby.setStatus("PLAYING");
-        activeLobby.setPlayerIds(List.of(inviteeId));
-        Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(List.of(activeLobby));
+        // Guard condition: target is already in a PLAYING lobby
+        Mockito.when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", inviteeId)).thenReturn(true);
 
         CaboInviteCreateDTO body = new CaboInviteCreateDTO();
         body.setToUserId(inviteeId);
@@ -209,7 +206,7 @@ public class CaboInviteServiceTest {
         Lobby waitingLobby = new Lobby();
         waitingLobby.setId(lobbyId);
         Mockito.when(lobbyService.requireWaitingLobbyForHost(hostId)).thenReturn(waitingLobby);
-        Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(new ArrayList<>());
+        Mockito.when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", inviteeId)).thenReturn(false);
 
         // Guard Condition: Mock 3 pre-existing active invites to other players (slots full)
         CaboInvite activeInv1 = new CaboInvite(); activeInv1.setToUserId(8L); activeInv1.setStatus(CaboInviteStatus.PENDING);
@@ -248,7 +245,7 @@ public class CaboInviteServiceTest {
         Lobby waitingLobby = new Lobby();
         waitingLobby.setId(lobbyId);
         Mockito.when(lobbyService.requireWaitingLobbyForHost(hostId)).thenReturn(waitingLobby);
-        Mockito.when(lobbyRepository.findByStatus("PLAYING")).thenReturn(new ArrayList<>());
+        Mockito.when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", inviteeId)).thenReturn(false);
         Mockito.when(caboInviteRepository.findByFromUserIdAndLobbyIdOrderByCreatedAtDesc(hostId, lobbyId))
                 .thenReturn(new ArrayList<>());
 

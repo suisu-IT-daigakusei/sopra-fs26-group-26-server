@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.time.Instant;
 
 import org.mockito.Mockito;
 import org.junit.jupiter.api.Test;
@@ -107,5 +108,56 @@ public class HistoryServiceTest {
         
         // Verify the system never tried to load all sessions from the database
         Mockito.verify(sessionRepository, Mockito.never()).findAll();
+    }
+
+    @Test
+    void getUserSessionHistory_usesShortLivedCacheToAvoidDuplicateDbReads() {
+        User mockUser = new User();
+        mockUser.setId(5L);
+
+        Session session = new Session();
+        session.setSessionId("cached-session");
+        session.setTotalScoreByUserId(Map.of(5L, 10));
+
+        Mockito.when(userRepository.findById(5L)).thenReturn(Optional.of(mockUser));
+        Mockito.when(sessionRepository.findAll()).thenReturn(List.of(session));
+
+        List<Session> first = historyService.getUserSessionHistory(5L);
+        List<Session> second = historyService.getUserSessionHistory(5L);
+
+        assertEquals(1, first.size());
+        assertEquals(1, second.size());
+        assertEquals("cached-session", second.get(0).getSessionId());
+        Mockito.verify(sessionRepository, Mockito.times(1)).findAll();
+    }
+
+    @Test
+    void getUserSessionHistory_sortsDescendingAndSkipsMalformedSessions() {
+        User mockUser = new User();
+        mockUser.setId(6L);
+
+        Session newest = new Session();
+        newest.setSessionId("newest");
+        newest.setStartTime(Instant.now());
+        newest.setTotalScoreByUserId(Map.of(6L, 20));
+
+        Session older = new Session();
+        older.setSessionId("older");
+        older.setStartTime(Instant.now().minusSeconds(120));
+        older.setTotalScoreByUserId(Map.of(6L, 30));
+
+        Session malformed = new Session();
+        malformed.setSessionId("malformed");
+        malformed.setStartTime(Instant.now().minusSeconds(60));
+        malformed.setTotalScoreByUserId(null);
+
+        Mockito.when(userRepository.findById(6L)).thenReturn(Optional.of(mockUser));
+        Mockito.when(sessionRepository.findAll()).thenReturn(java.util.Arrays.asList(malformed, older, newest, null));
+
+        List<Session> history = historyService.getUserSessionHistory(6L);
+
+        assertEquals(2, history.size());
+        assertEquals("newest", history.get(0).getSessionId());
+        assertEquals("older", history.get(1).getSessionId());
     }
 }

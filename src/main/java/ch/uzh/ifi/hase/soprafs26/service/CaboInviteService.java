@@ -22,6 +22,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Set;
 import java.time.LocalDateTime;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -90,8 +92,7 @@ public class CaboInviteService {
         Lobby waiting = lobbyService.requireWaitingLobbyForHost(from.getId());
         Long lobbyId = waiting.getId();
 
-        boolean targetInAnyPlayingLobby = lobbyRepository.findByStatus("PLAYING").stream()
-                .anyMatch(lobby -> lobby.getPlayerIds() != null && lobby.getPlayerIds().contains(toUserId));
+        boolean targetInAnyPlayingLobby = lobbyRepository.existsByStatusAndPlayerId("PLAYING", toUserId);
         if (targetInAnyPlayingLobby) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "User is currently playing");
         }
@@ -280,11 +281,23 @@ public class CaboInviteService {
 
         List<CaboInvite> pendingInvites = caboInviteRepository.findByStatus(CaboInviteStatus.PENDING);
         List<CaboInvite> stalePendingInvites = new ArrayList<>();
+        Set<Long> lobbyIds = new HashSet<>();
+        for (CaboInvite invite : pendingInvites) {
+            if (invite != null && invite.getLobbyId() != null) {
+                lobbyIds.add(invite.getLobbyId());
+            }
+        }
+        Set<Long> waitingLobbyIds = new HashSet<>();
+        for (Lobby lobby : lobbyRepository.findAllById(lobbyIds)) {
+            if (lobby != null && lobby.getId() != null && "WAITING".equals(lobby.getStatus())) {
+                waitingLobbyIds.add(lobby.getId());
+            }
+        }
         for (CaboInvite invite : pendingInvites) {
             if (invite == null || invite.getLobbyId() == null) {
                 continue;
             }
-            if (!lobbyService.isLobbyWaiting(invite.getLobbyId())) {
+            if (!waitingLobbyIds.contains(invite.getLobbyId())) {
                 invite.setStatus(CaboInviteStatus.DECLINED);
                 stalePendingInvites.add(invite);
             }

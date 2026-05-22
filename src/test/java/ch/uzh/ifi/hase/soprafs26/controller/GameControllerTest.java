@@ -835,4 +835,53 @@ public class GameControllerTest {
                .andExpect(status().isBadRequest()); // Expecting 400 BAD REQUEST
     }
 
+    @Test
+    void isMyTurn_validRequest_returnsBoolean() throws Exception {
+        Mockito.when(gameService.isMyTurn("game-123", 42L)).thenReturn(true);
+
+        mockMvc.perform(get("/games/game-123/is-my-turn/42"))
+               .andExpect(status().isOk())
+               .andExpect(jsonPath("$", is(true)));
+    }
+
+    @Test
+    void getMyHand_validRequest_returnsCards() throws Exception {
+        Card handCard = new Card();
+        handCard.setCode("5C");
+        handCard.setValue(5);
+        handCard.setVisibility(false);
+        Mockito.when(gameService.getMyHand("game-123", "valid-token")).thenReturn(List.of(handCard));
+
+        mockMvc.perform(get("/games/game-123/my-hand")
+                .header("Authorization", "valid-token"))
+               .andExpect(status().isOk())
+               .andExpect(jsonPath("$[0].code", is("5C")))
+               .andExpect(jsonPath("$[0].value", is(5)));
+    }
+
+    @Test
+    void getGameRuntimeConfig_validRequest_returnsConfigMap() throws Exception {
+        Mockito.when(gameService.getGameRuntimeConfig("game-123", "valid-token"))
+               .thenReturn(java.util.Map.of("turnTimeoutMs", 30000L, "rematchDecisionSeconds", 60L));
+
+        mockMvc.perform(get("/games/game-123/config")
+                .header("Authorization", "valid-token"))
+               .andExpect(status().isOk())
+               .andExpect(jsonPath("$.turnTimeoutMs", is(30000)))
+               .andExpect(jsonPath("$.rematchDecisionSeconds", is(60)));
+    }
+
+    @Test
+    void resumeGame_validSession_returnsCreated() throws Exception {
+        Game resumed = new Game();
+        resumed.setId("game-777");
+        Mockito.when(gameService.resumeGame(77L)).thenReturn(resumed);
+
+        mockMvc.perform(post("/games/resume/77")
+                .contentType(MediaType.APPLICATION_JSON))
+               .andExpect(status().isCreated());
+
+        Mockito.verify(gameService, Mockito.times(1)).resumeGame(77L);
+    }
+
 }

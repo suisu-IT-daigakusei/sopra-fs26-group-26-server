@@ -706,6 +706,88 @@ public class LobbyServiceTest {
 	}
 
 	@Test
+	public void handleRoundResolvedForGamePlayers_twoFreshVotes_duplicatePlayingLobbies_preservesSpectatorAndDeletesDuplicates() {
+		Lobby olderPlayingLobby = new Lobby();
+		olderPlayingLobby.setId(40L);
+		olderPlayingLobby.setSessionId("PLAY-OLDER");
+		olderPlayingLobby.setSessionHostUserId(1L);
+		olderPlayingLobby.setStatus("PLAYING");
+		olderPlayingLobby.setIsPublic(true);
+		olderPlayingLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L, 3L)));
+		olderPlayingLobby.setSpectatorIds(new ArrayList<>(List.of(9L)));
+		olderPlayingLobby.setAfkTimeoutSeconds(360L);
+		olderPlayingLobby.setInitialPeekSeconds(12L);
+		olderPlayingLobby.setTurnSeconds(25L);
+		olderPlayingLobby.setAbilityRevealSeconds(7L);
+		olderPlayingLobby.setAbilitySwapSeconds(13L);
+		olderPlayingLobby.setAbsentRoundPoints(22L);
+		olderPlayingLobby.setWebsocketGraceSeconds(333L);
+
+		Lobby newerPlayingLobby = new Lobby();
+		newerPlayingLobby.setId(41L);
+		newerPlayingLobby.setSessionId("PLAY-NEWER");
+		newerPlayingLobby.setSessionHostUserId(1L);
+		newerPlayingLobby.setStatus("PLAYING");
+		newerPlayingLobby.setIsPublic(true);
+		newerPlayingLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L, 3L)));
+		newerPlayingLobby.setAfkTimeoutSeconds(360L);
+		newerPlayingLobby.setInitialPeekSeconds(12L);
+		newerPlayingLobby.setTurnSeconds(25L);
+		newerPlayingLobby.setAbilityRevealSeconds(7L);
+		newerPlayingLobby.setAbilitySwapSeconds(13L);
+		newerPlayingLobby.setAbsentRoundPoints(22L);
+		newerPlayingLobby.setWebsocketGraceSeconds(333L);
+
+		Mockito.when(lobbyRepository.findByStatusAndPlayerSetKey("PLAYING", "1,2,3"))
+				.thenReturn(List.of(olderPlayingLobby, newerPlayingLobby));
+		Mockito.when(lobbyRepository.findByStatus("PLAYING"))
+				.thenReturn(List.of(olderPlayingLobby, newerPlayingLobby));
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class))).thenAnswer(invocation -> {
+			Lobby saved = invocation.getArgument(0);
+			if (saved.getId() == null) {
+				saved.setId(4100L);
+			}
+			return saved;
+		});
+
+		User p1 = new User();
+		p1.setId(1L);
+		p1.setStatus(UserStatus.PLAYING);
+		User p2 = new User();
+		p2.setId(2L);
+		p2.setStatus(UserStatus.PLAYING);
+		User p3 = new User();
+		p3.setId(3L);
+		p3.setStatus(UserStatus.PLAYING);
+		User spectator = new User();
+		spectator.setId(9L);
+		spectator.setStatus(UserStatus.SPECTATING);
+
+		Mockito.when(userRepository.findAllById(Mockito.anyIterable())).thenReturn(List.of(p1, p2, p3));
+		Mockito.when(userRepository.saveAll(Mockito.anyIterable())).thenAnswer(invocation -> invocation.getArgument(0));
+		Mockito.when(userRepository.findAllById(List.of(1L, 2L))).thenReturn(List.of(p1, p2));
+		Mockito.when(userRepository.findAllById(List.of(3L))).thenReturn(List.of(p3));
+		Mockito.when(userRepository.findAllById(List.of(9L))).thenReturn(List.of(spectator));
+
+		lobbyService.handleRoundResolvedForGamePlayers(
+				List.of(1L, 2L, 3L),
+				List.of(),
+				List.of(1L, 2L)
+		);
+
+		ArgumentCaptor<Lobby> savedLobbyCaptor = ArgumentCaptor.forClass(Lobby.class);
+		Mockito.verify(lobbyRepository).save(savedLobbyCaptor.capture());
+		Lobby freshLobby = savedLobbyCaptor.getValue();
+
+		assertEquals("WAITING", freshLobby.getStatus());
+		assertEquals(List.of(1L, 2L), freshLobby.getPlayerIds());
+		assertEquals(List.of(9L), freshLobby.getSpectatorIds());
+		assertEquals(UserStatus.SPECTATING, spectator.getStatus());
+		Mockito.verify(lobbyRepository).delete(olderPlayingLobby);
+		Mockito.verify(lobbyRepository).delete(newerPlayingLobby);
+	}
+
+	@Test
 	public void handleRoundResolvedForGamePlayers_twoFreshVotes_invalidFreshRematchRequesterId_fallsBackToHostBasedOnTurnOrder() {
 		givenPlayingLobbyForFreshRematchScenario(13L, "PLAY-FRESH-FALLBACK", 1301L);
 
@@ -1168,10 +1250,14 @@ public class LobbyServiceTest {
 
 	@Test
 	public void findWebsocketGraceSecondsForUser_validWaitingLobby_returnsWaitingGrace() {
-		// 1. Setup: User has a WAITING lobby with a valid grace period
+		// 1. Setup: User has a WAITING lobby with a valid grace period and no PLAYING lobby.
 		Lobby waitingLobby = new Lobby();
+		waitingLobby.setStatus("WAITING");
+		waitingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
 		waitingLobby.setWebsocketGraceSeconds(45L);
 		
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L))
+			   .thenReturn(List.of());
 		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
 			   .thenReturn(List.of(waitingLobby));
 
@@ -1180,19 +1266,41 @@ public class LobbyServiceTest {
 
 		// 3. Assertion
 		assertEquals(45L, result);
-		
-		// Verify short-circuiting: It should skip the PLAYING check entirely
-		Mockito.verify(lobbyRepository, Mockito.never())
-			   .findByStatusAndParticipantId("PLAYING", 1L);
+	}
+
+	@Test
+	public void findWebsocketGraceSecondsForUser_waitingAndPlayingValid_prefersPlayingGrace() {
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setStatus("WAITING");
+		waitingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+		waitingLobby.setWebsocketGraceSeconds(45L);
+
+		Lobby playingLobby = new Lobby();
+		playingLobby.setStatus("PLAYING");
+		playingLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+		playingLobby.setWebsocketGraceSeconds(60L);
+
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L))
+			   .thenReturn(List.of(playingLobby));
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
+			   .thenReturn(List.of(waitingLobby));
+
+		Long result = lobbyService.findWebsocketGraceSecondsForUser(1L);
+
+		assertEquals(60L, result);
 	}
 
 	@Test
 	public void findWebsocketGraceSecondsForUser_waitingGraceNull_playingGraceValid_returnsPlayingGrace() {
 		// 1. Setup: WAITING lobby exists but has a null grace period. PLAYING lobby has a valid one.
 		Lobby waitingLobby = new Lobby();
+		waitingLobby.setStatus("WAITING");
+		waitingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
 		waitingLobby.setWebsocketGraceSeconds(null); // Hits the != null branch
 		
 		Lobby playingLobby = new Lobby();
+		playingLobby.setStatus("PLAYING");
+		playingLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
 		playingLobby.setWebsocketGraceSeconds(60L);
 
 		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
@@ -1211,9 +1319,13 @@ public class LobbyServiceTest {
 	public void findWebsocketGraceSecondsForUser_waitingGraceZero_playingGraceZero_returnsNull() {
 		// 1. Setup: Both lobbies exist, but both have 0 for their grace period
 		Lobby waitingLobby = new Lobby();
+		waitingLobby.setStatus("WAITING");
+		waitingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
 		waitingLobby.setWebsocketGraceSeconds(0L); // Hits the > 0 branch
 		
 		Lobby playingLobby = new Lobby();
+		playingLobby.setStatus("PLAYING");
+		playingLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
 		playingLobby.setWebsocketGraceSeconds(0L); // Hits the > 0 branch
 
 		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L))
@@ -1519,7 +1631,7 @@ public class LobbyServiceTest {
 	}
 
 	@Test
-	public void findWaitingLobbyForHost_hasWaitingLobby_returnsFirstMatch() {
+	public void findWaitingLobbyForHost_hasWaitingLobby_returnsNewestMatch() {
 		// 1. Setup: Host has a mix of lobbies, including multiple WAITING ones
 		Lobby playingLobby = new Lobby();
 		playingLobby.setStatus("PLAYING");
@@ -1532,16 +1644,16 @@ public class LobbyServiceTest {
 		secondWaitingLobby.setId(20L);
 		secondWaitingLobby.setStatus("WAITING");
 
-		// Note: The list order matters to test findFirst()
+		// Note: List order should not matter, newest WAITING lobby should win.
 		Mockito.when(lobbyRepository.findBySessionHostUserId(1L))
 			   .thenReturn(List.of(playingLobby, targetWaitingLobby, secondWaitingLobby));
 
 		// 2. Action
 		Optional<Lobby> result = lobbyService.findWaitingLobbyForHost(1L);
 
-		// 3. Assertion: It should skip PLAYING, find the first WAITING lobby (ID 10), and stop
+		// 3. Assertion: It should skip PLAYING and return the WAITING lobby with max ID.
 		assertTrue(result.isPresent());
-		assertEquals(10L, result.get().getId());
+		assertEquals(20L, result.get().getId());
 	}
 
 	@Test
@@ -3188,8 +3300,10 @@ public class LobbyServiceTest {
 		Lobby waitingLobby = new Lobby();
 		waitingLobby.setSessionId("S1");
 		waitingLobby.setStatus("WAITING");
+		waitingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
 		
 		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L)).thenReturn(List.of(waitingLobby));
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L)).thenReturn(List.of());
 		
 		// Mock findBySessionId to prevent the downstream 'removePlayerFromDisconnect' from throwing an NPE
 		Mockito.when(lobbyRepository.findBySessionId("S1")).thenReturn(waitingLobby);
@@ -3203,6 +3317,30 @@ public class LobbyServiceTest {
 
 		// 3. Assertion: Handled status update (removePlayerFromDisconnect will handle the rest)
 		assertEquals(UserStatus.OFFLINE, user.getStatus());
+	}
+
+	@Test
+	public void handlePermanentDisconnect_prefersPlayingLobbyWhenBothMembershipsExist() {
+		Lobby waitingLobby = new Lobby();
+		waitingLobby.setSessionId("WAITING-S1");
+		waitingLobby.setStatus("WAITING");
+		waitingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+
+		Lobby playingLobby = new Lobby();
+		playingLobby.setId(10L);
+		playingLobby.setSessionId("PLAYING-S1");
+		playingLobby.setStatus("PLAYING");
+		playingLobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("WAITING", 1L)).thenReturn(List.of(waitingLobby));
+		Mockito.when(lobbyRepository.findByStatusAndParticipantId("PLAYING", 1L)).thenReturn(List.of(playingLobby));
+
+		lobbyService.handlePermanentDisconnect(1L);
+
+		// Active PLAYING players should be timed out (not set OFFLINE immediately).
+		Mockito.verify(userRepository, Mockito.never()).findById(1L);
+		Mockito.verify(gameService).handlePlayerDisconnectDuringActiveGame(1L);
+		Mockito.verify(onlineUsersEventPublisher).broadcastOnlineUsers();
 	}
 
 	@Test
@@ -3275,10 +3413,10 @@ public class LobbyServiceTest {
 		// 2. Action
 		lobbyService.handlePermanentDisconnect(1L);
 
-		// 3. Assertion: Safely falls back to the spectator clean-up branch without throwing NPE
+		// 3. Assertion: Invalid membership data is ignored; user is set offline without lobby mutation.
 		assertEquals(UserStatus.OFFLINE, user.getStatus());
-		Mockito.verify(lobbyRepository).save(brokenLobby);
-		Mockito.verify(lobbyEventPublisher).broadcastLobbyUpdate(10L, brokenLobby);
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+		Mockito.verify(lobbyEventPublisher, Mockito.never()).broadcastLobbyUpdate(Mockito.anyLong(), Mockito.any());
 	}
 
 	@Test
