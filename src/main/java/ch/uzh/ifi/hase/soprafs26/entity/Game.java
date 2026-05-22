@@ -16,7 +16,7 @@ import java.time.Instant;
 import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 
 @Entity
-// create a table with name games in the DB
+// create a table with name games in DB
 @Table(name = "games", indexes = {
         @Index(name = "idx_games_status", columnList = "status"),
         @Index(name = "idx_games_status_round_ended_at", columnList = "status,round_ended_at")
