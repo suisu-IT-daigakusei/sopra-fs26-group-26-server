@@ -276,12 +276,10 @@ public class DisconnectService {
             try {
                 action.run();
             } finally {
-                activeTimers.compute(userId, (id, existing) -> {
-                    if (existing != null && existing.version == timerVersion) {
-                        return null;
-                    }
-                    return existing;
-                });
+                activeTimers.compute(
+                        userId,
+                        (id, existing) -> existing != null && existing.version == timerVersion ? null : existing
+                );
             }
         }, safeDelaySeconds, TimeUnit.SECONDS);
         activeTimers.put(userId, new DisconnectTimerEntry(timerVersion, future));

@@ -13,6 +13,7 @@ import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.LobbySettingsPatchDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.WaitingLobbyPlayerRowDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.WaitingLobbyViewDTO;
+import org.hibernate.Hibernate;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -638,19 +639,19 @@ public class LobbyService {
             return null;
         }
         if (lobby.getPlayerIds() != null) {
-            lobby.getPlayerIds().size();
+            Hibernate.initialize(lobby.getPlayerIds());
         }
         if (lobby.getSpectatorIds() != null) {
-            lobby.getSpectatorIds().size();
+            Hibernate.initialize(lobby.getSpectatorIds());
         }
         if (lobby.getKickedUserIds() != null) {
-            lobby.getKickedUserIds().size();
+            Hibernate.initialize(lobby.getKickedUserIds());
         }
         if (lobby.getAssignedCharacterColorByUserId() != null) {
-            lobby.getAssignedCharacterColorByUserId().size();
+            Hibernate.initialize(lobby.getAssignedCharacterColorByUserId());
         }
         if (lobby.getPlayerReadyByUserId() != null) {
-            lobby.getPlayerReadyByUserId().size();
+            Hibernate.initialize(lobby.getPlayerReadyByUserId());
         }
         return lobby;
     }
