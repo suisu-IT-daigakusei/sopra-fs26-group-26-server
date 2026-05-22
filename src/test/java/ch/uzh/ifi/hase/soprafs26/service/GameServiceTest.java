@@ -2156,6 +2156,71 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertEquals(2L, game.getCurrentPlayerId(), "Turn should advance to Player 2");
     }
 
+    @Test
+    public void executeTimoutMove_afterDiscardDraw_returnsDiscardCardAndAlsoDiscardsFromDrawPile() {
+        Game game = new Game();
+        game.setId("g-timeout-after-discard-draw");
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setCurrentPlayerId(1L);
+
+        Card heldDiscardCard = new Card();
+        heldDiscardCard.setCode("QH");
+        heldDiscardCard.setValue(12);
+        heldDiscardCard.setVisibility(true);
+        game.setDrawnCard(heldDiscardCard);
+        game.setDrawnFromDeck(false);
+
+        Card drawPileCard = new Card();
+        drawPileCard.setCode("2S");
+        drawPileCard.setValue(2);
+        game.setDrawPile(new ArrayList<>(List.of(drawPileCard)));
+
+        Card existingDiscard = new Card();
+        existingDiscard.setCode("9C");
+        existingDiscard.setValue(9);
+        existingDiscard.setVisibility(true);
+        game.setDiscardPile(new ArrayList<>(List.of(existingDiscard)));
+
+        when(gameRepository.findById("g-timeout-after-discard-draw")).thenReturn(Optional.of(game));
+        when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        gameService.executeTimoutMove("g-timeout-after-discard-draw", 1L);
+
+        assertEquals(0, game.getDrawPile().size(), "A timeout draw should consume one card from draw pile");
+        assertEquals(3, game.getDiscardPile().size(), "Discard should include returned discard card plus timeout-drawn card");
+        assertEquals("QH", game.getDiscardPile().get(1).getCode(), "Held discard card should be returned before timeout discard");
+        assertEquals("2S", game.getDiscardPile().get(2).getCode(), "Timeout should still discard a card drawn from draw pile");
+        assertTrue(game.getDiscardPile().get(2).getVisibility(), "Timeout-discarded draw card must be visible");
+        assertNull(game.getDrawnCard(), "Drawn slot should be cleared after timeout handling");
+        assertFalse(game.isDrawnFromDeck(), "drawnFromDeck flag should be reset");
+        assertEquals(2L, game.getCurrentPlayerId(), "Turn should advance");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void findActiveGameForUser_recentNoGameFallback_skipsLobbyAndGameQueries() throws Exception {
+        Long userId = 55L;
+
+        Field activeLookupField = GameService.class.getDeclaredField("activeGameLookupByUserId");
+        activeLookupField.setAccessible(true);
+        Map<Long, ?> activeLookupCache = (Map<Long, ?>) activeLookupField.get(gameService);
+        activeLookupCache.clear();
+
+        Field noPlayingFallbackField = GameService.class.getDeclaredField("noPlayingLobbyFallbackUntilByUserId");
+        noPlayingFallbackField.setAccessible(true);
+        Map<Long, Long> noPlayingFallback = (Map<Long, Long>) noPlayingFallbackField.get(gameService);
+        noPlayingFallback.put(userId, System.currentTimeMillis() + 60_000L);
+
+        Optional<Game> activeGame = gameService.findActiveGameForUser(userId);
+
+        assertTrue(activeGame.isEmpty(), "Fallback window should short-circuit to empty active game");
+        Mockito.verify(lobbyService, Mockito.never()).findLatestPlayingLobbyForPlayer(userId);
+        Mockito.verify(gameRepository, Mockito.never()).findById(Mockito.anyString());
+        Mockito.verify(gameRepository, Mockito.never())
+                .findGamesByPlayerIdExcludingStatus(Mockito.anyLong(), Mockito.anyString(), Mockito.anyString());
+    }
+
     // tests that swapping a drawn card with a card in hand properly discards the swapped-out card face-up and hides the new card in hand, then advances the turn
     @Test
     public void moveSwapDrawnCard_validIndex_swapsCardsAndDiscardsFaceUp() {

@@ -69,6 +69,7 @@ public class GameService {
     private static final int MIN_TRANSIENT_CACHE_MAX_ENTRIES = 256;
     private static final int AUTH_CACHE_ENTRY_MULTIPLIER = 2;
     private static final int SYNC_CACHE_ENTRY_MULTIPLIER = 4;
+    private static final int ACTIVE_GAME_LOOKUP_CACHE_ENTRY_MULTIPLIER = 2;
     private static final int REMATCH_DEDUP_CACHE_ENTRY_MULTIPLIER = 2;
     private static final int NO_PLAYING_FALLBACK_CACHE_ENTRY_MULTIPLIER = 2;
 
@@ -106,6 +107,16 @@ public class GameService {
 
         private CachedSyncState(SyncStateSnapshot snapshot, long expiresAtMs) {
             this.snapshot = snapshot;
+            this.expiresAtMs = expiresAtMs;
+        }
+    }
+
+    private static final class CachedActiveGameLookup {
+        private final String gameId;
+        private final long expiresAtMs;
+
+        private CachedActiveGameLookup(String gameId, long expiresAtMs) {
+            this.gameId = gameId;
             this.expiresAtMs = expiresAtMs;
         }
     }
@@ -156,6 +167,8 @@ public class GameService {
     private final AtomicLong lastAuthCacheCleanupMs = new AtomicLong(0L);
     private final Map<String, CachedSyncState> syncStateCacheByViewerAndGame = new ConcurrentHashMap<>();
     private final AtomicLong lastSyncStateCacheCleanupMs = new AtomicLong(0L);
+    private final Map<Long, CachedActiveGameLookup> activeGameLookupByUserId = new ConcurrentHashMap<>();
+    private final AtomicLong lastActiveGameLookupCacheCleanupMs = new AtomicLong(0L);
     private final Map<String, Long> rematchDecisionDedupUntilByKey = new ConcurrentHashMap<>();
     private final AtomicLong lastRematchDecisionDedupCleanupMs = new AtomicLong(0L);
     private final Map<Long, Long> noPlayingLobbyFallbackUntilByUserId = new ConcurrentHashMap<>();
@@ -571,6 +584,10 @@ public class GameService {
         return Math.max(1L, serverSettings.getSyncStateCacheTtlMs());
     }
 
+    private long resolveActiveGameLookupCacheTtlMs() {
+        return Math.max(1L, serverSettings.getPlayingLobbySnapshotCacheTtlMs());
+    }
+
     private long resolveRematchDecisionDedupWindowMs() {
         return Math.max(1L, serverSettings.getRematchDuplicateDecisionWindowMs());
     }
@@ -757,6 +774,108 @@ public class GameService {
         }
         int maxEntries = resolveTransientCacheMaxEntries() * SYNC_CACHE_ENTRY_MULTIPLIER;
         enforceCacheEntryCap(syncStateCacheByViewerAndGame, maxEntries);
+    }
+
+    private void maybeCleanupActiveGameLookupCache(long nowMs) {
+        long previousCleanupMs = lastActiveGameLookupCacheCleanupMs.get();
+        if (nowMs - previousCleanupMs < CACHE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastActiveGameLookupCacheCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+
+        Iterator<Map.Entry<Long, CachedActiveGameLookup>> iterator = activeGameLookupByUserId.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Long, CachedActiveGameLookup> entry = iterator.next();
+            CachedActiveGameLookup cachedLookup = entry.getValue();
+            if (cachedLookup == null
+                    || cachedLookup.expiresAtMs <= nowMs
+                    || cachedLookup.gameId == null
+                    || cachedLookup.gameId.isBlank()) {
+                iterator.remove();
+            }
+        }
+
+        int maxEntries = resolveTransientCacheMaxEntries() * ACTIVE_GAME_LOOKUP_CACHE_ENTRY_MULTIPLIER;
+        enforceCacheEntryCap(activeGameLookupByUserId, maxEntries);
+    }
+
+    private void clearActiveGameLookupCacheForPlayers(List<Long> playerIds) {
+        if (playerIds == null || playerIds.isEmpty()) {
+            return;
+        }
+        for (Long playerId : playerIds) {
+            if (playerId != null) {
+                activeGameLookupByUserId.remove(playerId);
+            }
+        }
+    }
+
+    private void clearActiveGameLookupEntriesForGame(String gameId) {
+        if (gameId == null || gameId.isBlank()) {
+            return;
+        }
+        String normalizedGameId = gameId.trim();
+        activeGameLookupByUserId.entrySet().removeIf(entry -> {
+            CachedActiveGameLookup cachedLookup = entry.getValue();
+            return cachedLookup == null || normalizedGameId.equals(cachedLookup.gameId);
+        });
+    }
+
+    private void cacheActiveGameLookupForPlayers(Game game, long nowMs) {
+        if (game == null || !isActiveGame(game)) {
+            return;
+        }
+        String gameId = game.getId();
+        if (gameId == null || gameId.isBlank()) {
+            return;
+        }
+
+        List<Long> playerIds = game.getOrderedPlayerIds();
+        if (playerIds == null || playerIds.isEmpty()) {
+            return;
+        }
+
+        long expiresAtMs = nowMs + resolveActiveGameLookupCacheTtlMs();
+        CachedActiveGameLookup cachedLookup = new CachedActiveGameLookup(gameId, expiresAtMs);
+        for (Long playerId : playerIds) {
+            if (playerId != null) {
+                activeGameLookupByUserId.put(playerId, cachedLookup);
+            }
+        }
+        maybeCleanupActiveGameLookupCache(nowMs);
+    }
+
+    private Optional<Game> findCachedActiveGameForUser(Long userId, long nowMs) {
+        if (userId == null) {
+            return Optional.empty();
+        }
+        CachedActiveGameLookup cachedLookup = activeGameLookupByUserId.get(userId);
+        if (cachedLookup == null) {
+            return Optional.empty();
+        }
+        if (cachedLookup.expiresAtMs <= nowMs || cachedLookup.gameId == null || cachedLookup.gameId.isBlank()) {
+            activeGameLookupByUserId.remove(userId, cachedLookup);
+            return Optional.empty();
+        }
+
+        Optional<Game> cachedGame = gameRepository.findById(cachedLookup.gameId);
+        if (cachedGame.isEmpty()) {
+            activeGameLookupByUserId.remove(userId, cachedLookup);
+            return Optional.empty();
+        }
+
+        Game resolvedGame = cachedGame.get();
+        List<Long> orderedPlayerIds = resolvedGame.getOrderedPlayerIds();
+        if (!isActiveGame(resolvedGame) || orderedPlayerIds == null || !orderedPlayerIds.contains(userId)) {
+            clearActiveGameLookupCacheForPlayers(orderedPlayerIds);
+            activeGameLookupByUserId.remove(userId, cachedLookup);
+            return Optional.empty();
+        }
+
+        cacheActiveGameLookupForPlayers(resolvedGame, nowMs);
+        return Optional.of(resolvedGame);
     }
 
     private GameSyncStateDTO buildSyncStatePayload(Game game, User viewer, boolean participant, boolean spectator) {
@@ -2011,6 +2130,19 @@ public class GameService {
         }
 
         long nowMs = System.currentTimeMillis();
+        Optional<Game> cachedActiveGame = findCachedActiveGameForUser(userId, nowMs);
+        if (cachedActiveGame.isPresent()) {
+            noPlayingLobbyFallbackUntilByUserId.remove(userId);
+            return cachedActiveGame;
+        }
+        maybeCleanupActiveGameLookupCache(nowMs);
+
+        // If we recently confirmed that this user has no active game context, skip repeated
+        // lobby/database lookups for a short fallback window to avoid hot polling load after round end.
+        Long skipUntilMs = noPlayingLobbyFallbackUntilByUserId.get(userId);
+        if (skipUntilMs != null && skipUntilMs > nowMs) {
+            return Optional.empty();
+        }
 
         if (lobbyService != null) {
             Optional<Lobby> playingLobbyForPlayer = Optional
@@ -2020,20 +2152,19 @@ public class GameService {
                 noPlayingLobbyFallbackUntilByUserId.remove(userId);
                 Optional<Game> activeByLobby = findActiveGameMatchingLobbyPlayers(playingLobbyForPlayer.get().getPlayerIds());
                 if (activeByLobby.isPresent()) {
+                    cacheActiveGameLookupForPlayers(activeByLobby.get(), nowMs);
                     return activeByLobby;
                 }
                 // Safety fallback only when a PLAYING lobby exists but game lookup mismatches.
                 // This keeps recovery behavior while avoiding global scans for users not in-game.
-                return gameRepository.findGamesByPlayerId(userId).stream()
+                Optional<Game> activeByUser = gameRepository.findGamesByPlayerId(userId).stream()
                         .filter(this::isActiveGame)
                         .filter(game -> game.getOrderedPlayerIds() != null && game.getOrderedPlayerIds().contains(userId))
                         .findFirst();
+                activeByUser.ifPresent(game -> cacheActiveGameLookupForPlayers(game, nowMs));
+                return activeByUser;
             }
 
-            Long skipUntilMs = noPlayingLobbyFallbackUntilByUserId.get(userId);
-            if (skipUntilMs != null && skipUntilMs > nowMs) {
-                return Optional.empty();
-            }
             Optional<Game> fallbackResult = gameRepository.findGamesByPlayerId(userId).stream()
                     .filter(this::isActiveGame)
                     .filter(game -> game.getOrderedPlayerIds() != null && game.getOrderedPlayerIds().contains(userId))
@@ -2043,14 +2174,17 @@ public class GameService {
                 maybeCleanupNoPlayingLobbyFallbackCache(nowMs);
             } else {
                 noPlayingLobbyFallbackUntilByUserId.remove(userId);
+                cacheActiveGameLookupForPlayers(fallbackResult.get(), nowMs);
             }
             return fallbackResult;
         }
 
-        return gameRepository.findGamesByPlayerId(userId).stream()
+        Optional<Game> fallbackWithoutLobbyService = gameRepository.findGamesByPlayerId(userId).stream()
                 .filter(this::isActiveGame)
                 .filter(game -> game.getOrderedPlayerIds() != null && game.getOrderedPlayerIds().contains(userId))
                 .findFirst();
+        fallbackWithoutLobbyService.ifPresent(game -> cacheActiveGameLookupForPlayers(game, nowMs));
+        return fallbackWithoutLobbyService;
     }
 
     @Transactional(readOnly = true)
@@ -2143,6 +2277,7 @@ public class GameService {
         long nowMs = System.currentTimeMillis();
         maybeCleanupAuthenticatedUserCache(nowMs);
         maybeCleanupSyncStateCache(nowMs);
+        maybeCleanupActiveGameLookupCache(nowMs);
         maybeCleanupRematchDecisionDedupCache(nowMs);
         maybeCleanupNoPlayingLobbyFallbackCache(nowMs);
         maybeCleanupStaleEndedGames(nowMs);
@@ -2169,6 +2304,7 @@ public class GameService {
             return;
         }
         cancelTurnTimer(gameId);
+        clearActiveGameLookupEntriesForGame(gameId);
         rematchDecisionTimerCounts.remove(gameId);
         rematchResolutionLocks.remove(gameId);
         abilityTimerCounts.remove(gameId);
@@ -2180,6 +2316,11 @@ public class GameService {
     private Game saveGameAndBroadcast(Game game) {
         Game saved = gameRepository.save(game);
         invalidateSyncStateCacheForGame(saved.getId());
+        if (isActiveGame(saved)) {
+            cacheActiveGameLookupForPlayers(saved, System.currentTimeMillis());
+        } else {
+            clearActiveGameLookupCacheForPlayers(saved.getOrderedPlayerIds());
+        }
         gameEventPublisher.publishFilteredState(saved);
         return saved;
     }
@@ -2329,17 +2470,31 @@ public class GameService {
 
         if(status == GameStatus.ROUND_ACTIVE) {
 
+            // If timeout happens after drawing from discard pile, return that card first and
+            // still perform the AFK penalty draw->discard from draw pile.
+            if (cardToDiscard != null && !game.isDrawnFromDeck()) {
+                cardToDiscard.setVisibility(true);
+                discardPile.add(cardToDiscard);
+                cardToDiscard = null;
+            }
+
             // make sure a card is drawn - if not, draw one from the draw pile (triggering reshuffle if necessary)
             if (cardToDiscard == null) {
                 if (game.getDrawPile().isEmpty()) {
                     reshuffleDiscardPile(gameId);
                     game = getGameById(gameId);
+                    discardPile = game.getDiscardPile();
                 }
-                cardToDiscard = game.getDrawPile().remove(0);
+                if (!game.getDrawPile().isEmpty()) {
+                    cardToDiscard = game.getDrawPile().remove(0);
+                }
             }
-            // discard the card (it is visible since it is being discarded)
-            cardToDiscard.setVisibility(true);
-            discardPile.add(cardToDiscard);
+
+            if (cardToDiscard != null) {
+                // discard the card (it is visible since it is being discarded)
+                cardToDiscard.setVisibility(true);
+                discardPile.add(cardToDiscard);
+            }
             game.setDrawnCard(null);
             game.setDrawnFromDeck(false);
         }
