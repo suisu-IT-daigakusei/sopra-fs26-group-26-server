@@ -702,13 +702,12 @@ public class LobbyService {
         }
 
         for (Lobby staleLobby : stalePlayingLobbies) {
-            List<Long> playerIds = new ArrayList<>(staleLobby.getPlayerIds());
-            List<Long> spectatorIds = staleLobby.getSpectatorIds() != null
-                    ? new ArrayList<>(staleLobby.getSpectatorIds())
-                    : List.of();
-            lobbyRepository.delete(staleLobby);
+            List<Long> playerIds = staleLobby.getPlayerIds() == null
+                    ? List.of()
+                    : new ArrayList<>(staleLobby.getPlayerIds());
+            clearTimedOutPlayingFlags(playerIds);
+            deleteLobbyAndReleaseSpectatorsIfAny(staleLobby);
             setUsersStatus(playerIds, UserStatus.ONLINE);
-            setUsersStatus(spectatorIds, UserStatus.ONLINE);
         }
         onlineUsersEventPublisher.broadcastOnlineUsers();
     }
@@ -2064,7 +2063,11 @@ public class LobbyService {
     }
 
     public void removePlayerFromDisconnect(String sessionId, Long userId) {
-        Lobby lobby = getLobbyBySessionId(sessionId);
+        Lobby lobby = lobbyRepository.findBySessionId(sessionId);
+        if (lobby == null) {
+            clearTimedOutPlayingFlag(userId);
+            return;
+        }
         // only players are disconnected, spectators are removed immediately
         if ("PLAYING".equals(lobby.getStatus()) && lobby.getPlayerIds().contains(userId)) {
             timedOutInPlayingPlayerIds.add(userId);

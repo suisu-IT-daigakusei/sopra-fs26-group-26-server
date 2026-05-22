@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 
 import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
+import java.time.Instant;
 import java.util.List;
 
 @Repository("gameRepository")
@@ -14,10 +15,17 @@ public interface GameRepository extends JpaRepository<Game, String> {
     
     // find all active games a player is part of
     @Query(value = "SELECT * FROM games WHERE status <> :excludedStatus "
-            + "AND CAST(ordered_player_ids AS VARCHAR) LIKE CONCAT('%', :playerId, '%')",
+            + "AND ("
+            + "REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') = CONCAT('[', :playerId, ']') "
+            + "OR REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') LIKE CONCAT('[', :playerId, ',%') "
+            + "OR REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') LIKE CONCAT('%,', :playerId, ',%') "
+            + "OR REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') LIKE CONCAT('%,', :playerId, ']')"
+            + ")",
             nativeQuery = true)
     List<Game> findGamesByPlayerIdExcludingStatus(@Param("playerId") Long playerId,
                                                   @Param("excludedStatus") int excludedStatus);
+
+    List<Game> findTop200ByStatusAndRoundEndedAtBeforeOrderByRoundEndedAtAsc(GameStatus status, Instant cutoff);
 
     default List<Game> findGamesByPlayerId(Long playerId) {
         return findGamesByPlayerIdExcludingStatus(playerId, GameStatus.ROUND_ENDED.ordinal());

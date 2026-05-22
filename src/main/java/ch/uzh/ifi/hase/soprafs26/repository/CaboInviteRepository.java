@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Optional;
+import java.time.LocalDateTime;
 
 @Repository
 public interface CaboInviteRepository extends JpaRepository<CaboInvite, Long> {
@@ -17,4 +18,8 @@ public interface CaboInviteRepository extends JpaRepository<CaboInvite, Long> {
             Long fromUserId, Long toUserId, Long lobbyId, CaboInviteStatus status);
 
     List<CaboInvite> findByFromUserIdAndLobbyIdOrderByCreatedAtDesc(Long fromUserId, Long lobbyId);
+
+    List<CaboInvite> findByStatus(CaboInviteStatus status);
+
+    long deleteByStatusInAndCreatedAtBefore(List<CaboInviteStatus> statuses, LocalDateTime cutoff);
 }

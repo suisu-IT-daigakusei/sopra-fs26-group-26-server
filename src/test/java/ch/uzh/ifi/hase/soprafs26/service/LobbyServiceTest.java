@@ -3303,6 +3303,15 @@ public class LobbyServiceTest {
 	}
 
 	@Test
+	public void removePlayerFromDisconnect_missingLobby_safeNoop() {
+		Mockito.when(lobbyRepository.findBySessionId("MISSING")).thenReturn(null);
+
+		assertDoesNotThrow(() -> lobbyService.removePlayerFromDisconnect("MISSING", 1L));
+		Mockito.verify(lobbyRepository, Mockito.never()).save(Mockito.any());
+		Mockito.verify(onlineUsersEventPublisher, Mockito.never()).broadcastOnlineUsers();
+	}
+
+	@Test
 	public void removePlayerFromDisconnect_hostLeavesWithPlayersRemaining_reassignsHost() {
 		// 1. Setup: WAITING lobby with 2 players. User 1L is the Host.
 		Lobby lobby = new Lobby();

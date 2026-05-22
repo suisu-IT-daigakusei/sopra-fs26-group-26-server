@@ -7,7 +7,11 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "cabo_invites")
+@Table(name = "cabo_invites", indexes = {
+        @Index(name = "idx_cabo_invites_to_status_created", columnList = "to_user_id,status,created_at"),
+        @Index(name = "idx_cabo_invites_from_lobby_created", columnList = "from_user_id,lobby_id,created_at"),
+        @Index(name = "idx_cabo_invites_lobby_status", columnList = "lobby_id,status")
+})
 public class CaboInvite implements Serializable {
 
     private static final long serialVersionUID = 1L;

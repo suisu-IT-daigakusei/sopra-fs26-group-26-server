@@ -5,6 +5,7 @@ import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
+import jakarta.annotation.PreDestroy;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -27,7 +28,7 @@ public class DisconnectService {
     private final WebSocketSessionTracker webSocketSessionTracker;
 
     private final Map<Long, ScheduledFuture<?>> activeTimers = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(5);
+    private final ScheduledThreadPoolExecutor scheduler = createDisconnectScheduler();
 
     public DisconnectService(UserRepository userRepository,
                              @Lazy LobbyService lobbyService,
@@ -39,6 +40,20 @@ public class DisconnectService {
         this.gameService = gameService;
         this.timeoutSettings = timeoutSettings;
         this.webSocketSessionTracker = webSocketSessionTracker;
+    }
+
+    private static ScheduledThreadPoolExecutor createDisconnectScheduler() {
+        ScheduledThreadPoolExecutor executor = (ScheduledThreadPoolExecutor) Executors.newScheduledThreadPool(5);
+        // Avoid keeping canceled delayed tasks in memory until their original delay elapses.
+        executor.setRemoveOnCancelPolicy(true);
+        executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        executor.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+        return executor;
+    }
+
+    @PreDestroy
+    void shutdownScheduler() {
+        scheduler.shutdownNow();
     }
 
     /**
@@ -180,7 +195,7 @@ public class DisconnectService {
             user.setToken(UUID.randomUUID().toString());
             userRepository.save(user);
 
-            activeTimers.remove(user.getId());
+            cancelDisconnectTimer(user.getId());
             webSocketSessionTracker.clearSessions(user.getId());
         }
     }
@@ -247,19 +262,25 @@ public class DisconnectService {
             return;
         }
         User user = userRepository.findById(userId).orElse(null);
-        if (user == null) return;
+        if (user == null) {
+            cancelDisconnectTimer(userId);
+            webSocketSessionTracker.clearSessions(userId);
+            return;
+        }
         if (user.getStatus() == UserStatus.SPECTATING) {
             // Spectators are fully exempt from timeout-driven disconnect removal.
-            activeTimers.remove(userId);
+            cancelDisconnectTimer(userId);
+            webSocketSessionTracker.clearSessions(userId);
             return;
         }
         if (lobbyService != null && lobbyService.isPlayerTimedOutInPlaying(userId)) {
             // Idempotency guard for midgame timeout path.
+            cancelDisconnectTimer(userId);
             return;
         }
         if (user.getStatus() == UserStatus.OFFLINE) {
             // Idempotency guard for already-processed offline users.
-            activeTimers.remove(userId);
+            cancelDisconnectTimer(userId);
             webSocketSessionTracker.clearSessions(userId);
             return;
         }
@@ -267,7 +288,7 @@ public class DisconnectService {
         // Delegate lobby/game-aware timeout handling.
         lobbyService.handlePermanentDisconnect(userId);
         
-        activeTimers.remove(userId);
+        cancelDisconnectTimer(userId);
         webSocketSessionTracker.clearSessions(userId);
         long secondsSinceHeartbeat = -1L;
         Instant lastHeartbeat = user.getLastHeartbeat();

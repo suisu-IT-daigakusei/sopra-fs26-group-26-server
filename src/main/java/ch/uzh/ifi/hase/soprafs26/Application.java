@@ -9,6 +9,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
@@ -35,7 +36,13 @@ public class Application {
 	public ScheduledExecutorService gameScheduler(ObjectProvider<ServerSettingsProperties> serverSettingsProvider) {
 		ServerSettingsProperties defaults = new ServerSettingsProperties();
 		ServerSettingsProperties serverSettings = serverSettingsProvider.getIfAvailable(() -> defaults);
-		return Executors.newScheduledThreadPool(serverSettings.getGameSchedulerThreadPoolSize());
+		ScheduledThreadPoolExecutor scheduler = (ScheduledThreadPoolExecutor) Executors.newScheduledThreadPool(
+				serverSettings.getGameSchedulerThreadPoolSize());
+		// Immediate queue removal for canceled timers avoids delayed-task buildup under reconnect churn.
+		scheduler.setRemoveOnCancelPolicy(true);
+		scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+		scheduler.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+		return scheduler;
 	}
 
 	@Bean

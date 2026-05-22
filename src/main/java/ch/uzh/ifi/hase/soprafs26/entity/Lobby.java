@@ -28,6 +28,14 @@ public class Lobby implements Serializable {
     private Long sessionHostUserId; // userId of the creator
 
     @ElementCollection
+    @CollectionTable(
+            name = "lobby_player_ids",
+            joinColumns = @JoinColumn(name = "lobby_id"),
+            indexes = {
+                    @Index(name = "idx_lobby_player_ids_player_id", columnList = "player_ids"),
+                    @Index(name = "idx_lobby_player_ids_lobby_id", columnList = "lobby_id")
+            })
+    @Column(name = "player_ids")
     private List<Long> playerIds = new ArrayList<>(); // userIds of players in lobby
 
     // Users kicked by host from this waiting lobby.
@@ -81,6 +89,14 @@ public class Lobby implements Serializable {
 
     // user ID's of the spectators
     @ElementCollection
+    @CollectionTable(
+            name = "lobby_spectator_ids",
+            joinColumns = @JoinColumn(name = "lobby_id"),
+            indexes = {
+                    @Index(name = "idx_lobby_spectator_ids_user_id", columnList = "spectator_ids"),
+                    @Index(name = "idx_lobby_spectator_ids_lobby_id", columnList = "lobby_id")
+            })
+    @Column(name = "spectator_ids")
     private List<Long> spectatorIds = new ArrayList<>();
 
     // Assigned lobby character color per player (resolved from preferred priorities with fallback).

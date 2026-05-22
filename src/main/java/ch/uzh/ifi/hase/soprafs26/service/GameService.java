@@ -61,6 +61,9 @@ public class GameService {
     public static final String REMATCH_DECISION_NONE = "NONE";
     private static final long CACHE_CLEANUP_MIN_INTERVAL_MS = 1000L;
     private static final long NO_PLAYING_LOBBY_FALLBACK_TTL_MS = 45000L;
+    private static final long ENDED_GAME_RETENTION_MS = 30L * 60L * 1000L;
+    private static final long ENDED_GAME_CLEANUP_MIN_INTERVAL_MS = 60L * 1000L;
+    private static final int ENDED_GAME_CLEANUP_MAX_BATCHES_PER_RUN = 5;
 
     public static final class SyncStateSnapshot {
         private final GameSyncStateDTO payload;
@@ -150,6 +153,7 @@ public class GameService {
     private final AtomicLong lastRematchDecisionDedupCleanupMs = new AtomicLong(0L);
     private final Map<Long, Long> noPlayingLobbyFallbackUntilByUserId = new ConcurrentHashMap<>();
     private final AtomicLong lastNoPlayingLobbyFallbackCleanupMs = new AtomicLong(0L);
+    private final AtomicLong lastEndedGameCleanupMs = new AtomicLong(0L);
 
     private Object getRematchResolutionLock(String gameId) {
         return rematchResolutionLocks.computeIfAbsent(gameId, ignored -> new Object());
@@ -351,7 +355,9 @@ public class GameService {
         newGame.setCaboRevealSeconds(resolvedCaboRevealSeconds);
         newGame.setRematchDecisionSeconds(resolvedRematchDecisionSeconds);
         newGame.setAfkTimeoutSeconds(resolvedAfkTimeoutSeconds);
+        newGame.setRoundEndedAt(null);
         ensureSessionExistsForLobbyIfNeeded(lobbyConfig, sanitizedPlayerIds);
+        maybeCleanupStaleEndedGames(System.currentTimeMillis());
         // Save first to get a generated game id, then start the timer.
         Game saved = saveGameAndBroadcast(newGame);
         if (saved.getId() != null && !saved.getId().isBlank()) {
@@ -1770,14 +1776,23 @@ public class GameService {
         game.setRematchDecisionByUserId(new HashMap<>());
         // reset to null for further gameplay
         game.setFreshRematchRequesterUserId(null);
+        game.setRoundEndedAt(Instant.now());
         saveGameAndBroadcast(game);
 
-        if (lobbyService != null) {
-            lobbyService.handleRoundResolvedForGamePlayers(
-                    orderedPlayers, continuePlayers, freshPlayers, freshRematchRequesterUserId);
+        try {
+            if (lobbyService != null) {
+                lobbyService.handleRoundResolvedForGamePlayers(
+                        orderedPlayers, continuePlayers, freshPlayers, freshRematchRequesterUserId);
+            }
+        } catch (Exception e) {
+            // Keep the round state resolved even if post-round lobby transition races with concurrent cleanup.
+            log.error("Failed to transition lobby after rematch resolution for game {}", gameId, e);
+        } finally {
+            rematchDecisionTimerCounts.remove(gameId);
+            rematchResolutionLocks.remove(gameId);
+            abilityTimerCounts.remove(gameId);
+            maybeCleanupStaleEndedGames(System.currentTimeMillis());
         }
-        rematchDecisionTimerCounts.remove(gameId);
-        rematchResolutionLocks.remove(gameId);
     }
 
     // #91: if a player's session score is 100, reduce to 50 once
@@ -1859,6 +1874,42 @@ public class GameService {
             Long expiresAtMs = entry.getValue();
             if (expiresAtMs == null || expiresAtMs <= nowMs) {
                 iterator.remove();
+            }
+        }
+    }
+
+    private void maybeCleanupStaleEndedGames(long nowMs) {
+        long previousCleanupMs = lastEndedGameCleanupMs.get();
+        if (nowMs - previousCleanupMs < ENDED_GAME_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastEndedGameCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+
+        Instant cutoff = Instant.ofEpochMilli(nowMs - ENDED_GAME_RETENTION_MS);
+        for (int batch = 0; batch < ENDED_GAME_CLEANUP_MAX_BATCHES_PER_RUN; batch++) {
+            List<Game> staleEndedGames = gameRepository
+                    .findTop200ByStatusAndRoundEndedAtBeforeOrderByRoundEndedAtAsc(GameStatus.ROUND_ENDED, cutoff);
+            if (staleEndedGames == null || staleEndedGames.isEmpty()) {
+                return;
+            }
+
+            for (Game staleGame : staleEndedGames) {
+                if (staleGame == null || staleGame.getId() == null || staleGame.getId().isBlank()) {
+                    continue;
+                }
+                String staleGameId = staleGame.getId();
+                cancelTurnTimer(staleGameId);
+                rematchDecisionTimerCounts.remove(staleGameId);
+                rematchResolutionLocks.remove(staleGameId);
+                abilityTimerCounts.remove(staleGameId);
+                invalidateSyncStateCacheForGame(staleGameId);
+            }
+            gameRepository.deleteAll(staleEndedGames);
+
+            if (staleEndedGames.size() < 200) {
+                return;
             }
         }
     }

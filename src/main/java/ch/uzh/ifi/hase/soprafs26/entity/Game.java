@@ -11,13 +11,15 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.HashMap;
+import java.time.Instant;
 
 import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 
 @Entity
 // create a table with name games in the DB
 @Table(name = "games", indexes = {
-        @Index(name = "idx_games_status", columnList = "status")
+        @Index(name = "idx_games_status", columnList = "status"),
+        @Index(name = "idx_games_status_round_ended_at", columnList = "status,round_ended_at")
 })
 public class Game {
     
@@ -116,6 +118,11 @@ public class Game {
     // first user who requested a FRESH rematch
     @Column(nullable = true)
     private Long freshRematchRequesterUserId;
+
+    // Timestamp when this game entered ROUND_ENDED.
+    // Used to prune stale finished games and keep active-game lookups fast.
+    @Column(nullable = true)
+    private Instant roundEndedAt;
 
     // Last deterministic move event for client-side animation.
     @JdbcTypeCode(SqlTypes.JSON)
@@ -268,6 +275,14 @@ public class Game {
 
     public void setFreshRematchRequesterUserId(Long freshRematchRequesterUserId) {
         this.freshRematchRequesterUserId = freshRematchRequesterUserId;
+    }
+
+    public Instant getRoundEndedAt() {
+        return roundEndedAt;
+    }
+
+    public void setRoundEndedAt(Instant roundEndedAt) {
+        this.roundEndedAt = roundEndedAt;
     }
 
     public long getTurnSeconds() {

@@ -13,6 +13,7 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.CaboInvitePendingDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CaboInviteRespondDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CaboInviteSentDTO;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -20,16 +21,22 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
+import java.time.LocalDateTime;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 @Transactional
 public class CaboInviteService {
+    private static final long INVITE_CLEANUP_MIN_INTERVAL_MS = 30_000L;
+    private static final long RESOLVED_INVITE_RETENTION_HOURS = 12L;
 
     private final CaboInviteRepository caboInviteRepository;
     private final LobbyRepository lobbyRepository;
     private final UserRepository userRepository;
     private final CaboInviteEventPublisher caboInviteEventPublisher;
     private final LobbyService lobbyService;
+    private final AtomicLong lastInviteCleanupMs = new AtomicLong(0L);
 
     public CaboInviteService(CaboInviteRepository caboInviteRepository,
                              LobbyRepository lobbyRepository,
@@ -68,6 +75,7 @@ public class CaboInviteService {
     }
 
     private CaboInvitePendingDTO createInviteInternal(String token, CaboInviteCreateDTO body) {
+        maybeCleanupStaleInvites();
         if (body == null || body.getToUserId() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "toUserId is required");
         }
@@ -129,6 +137,7 @@ public class CaboInviteService {
     }
 
     public List<CaboInviteSentDTO> getSentInvitesForUser(String token, Long userId) {
+        maybeCleanupStaleInvites();
         User host = getUserByToken(token);
         if (!host.getId().equals(userId)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unauthorized access!");
@@ -171,6 +180,7 @@ public class CaboInviteService {
     }
 
     public List<CaboInvitePendingDTO> getPendingInvitesForUser(String token, Long userId) {
+        maybeCleanupStaleInvites();
         User invitee = getUserByToken(token);
         if (!invitee.getId().equals(userId)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unauthorized access!");
@@ -237,6 +247,7 @@ public class CaboInviteService {
     }
 
     public void deleteInviteForUser(String token, Long userId, Long inviteId) {
+        maybeCleanupStaleInvites();
         User user = getUserByToken(token);
         if (!user.getId().equals(userId)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unauthorized access!");
@@ -250,5 +261,41 @@ public class CaboInviteService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Invite already resolved");
         }
         caboInviteRepository.delete(invite);
+    }
+
+    @Scheduled(fixedDelay = 60000)
+    public void cleanupStaleInvitesJob() {
+        maybeCleanupStaleInvites();
+    }
+
+    private void maybeCleanupStaleInvites() {
+        long nowMs = System.currentTimeMillis();
+        long previousCleanupMs = lastInviteCleanupMs.get();
+        if (nowMs - previousCleanupMs < INVITE_CLEANUP_MIN_INTERVAL_MS) {
+            return;
+        }
+        if (!lastInviteCleanupMs.compareAndSet(previousCleanupMs, nowMs)) {
+            return;
+        }
+
+        List<CaboInvite> pendingInvites = caboInviteRepository.findByStatus(CaboInviteStatus.PENDING);
+        List<CaboInvite> stalePendingInvites = new ArrayList<>();
+        for (CaboInvite invite : pendingInvites) {
+            if (invite == null || invite.getLobbyId() == null) {
+                continue;
+            }
+            if (!lobbyService.isLobbyWaiting(invite.getLobbyId())) {
+                invite.setStatus(CaboInviteStatus.DECLINED);
+                stalePendingInvites.add(invite);
+            }
+        }
+        if (!stalePendingInvites.isEmpty()) {
+            caboInviteRepository.saveAll(stalePendingInvites);
+        }
+
+        LocalDateTime cutoff = LocalDateTime.now().minusHours(RESOLVED_INVITE_RETENTION_HOURS);
+        caboInviteRepository.deleteByStatusInAndCreatedAtBefore(
+                List.of(CaboInviteStatus.ACCEPTED, CaboInviteStatus.DECLINED),
+                cutoff);
     }
 }

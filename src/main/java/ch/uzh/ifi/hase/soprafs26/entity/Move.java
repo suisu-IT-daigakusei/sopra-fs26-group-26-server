@@ -4,7 +4,10 @@ import jakarta.persistence.*;
 import java.time.Instant;
 
 @Entity
-@Table(name = "moves")
+@Table(name = "moves", indexes = {
+        @Index(name = "idx_moves_session_timestamp", columnList = "session_id,timestamp"),
+        @Index(name = "idx_moves_user_id", columnList = "user_id")
+})
 public class Move {
 
     @Id

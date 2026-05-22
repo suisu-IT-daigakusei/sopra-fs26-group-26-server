@@ -29,6 +29,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.context.ApplicationEventPublisher;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,6 +42,7 @@ import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -1773,6 +1775,59 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
                 eq(2L));
         // verify that fresh rematch requester id is reset to null for further gameplay
         assertNull(game.getFreshRematchRequesterUserId());
+    }
+
+    @Test
+    void resolveRematchDecision_lobbyTransitionFailureStillCleansInternalState() throws Exception {
+        String gameId = "g-rematch-cleanup";
+
+        Game game = new Game();
+        game.setId(gameId);
+        game.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        game.setRematchDecisionByUserId(new HashMap<>(Map.of(
+                1L, GameService.REMATCH_DECISION_NONE,
+                2L, GameService.REMATCH_DECISION_NONE
+        )));
+
+        Mockito.when(gameRepository.findById(gameId)).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+        Mockito.doThrow(new RuntimeException("lobby transition failed"))
+                .when(lobbyService)
+                .handleRoundResolvedForGamePlayers(
+                        eq(List.of(1L, 2L)),
+                        eq(List.of()),
+                        eq(List.of()),
+                        Mockito.isNull());
+
+        Field rematchTimerCountsField = GameService.class.getDeclaredField("rematchDecisionTimerCounts");
+        rematchTimerCountsField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<String, AtomicLong> rematchTimerCounts =
+                (Map<String, AtomicLong>) rematchTimerCountsField.get(gameService);
+        rematchTimerCounts.put(gameId, new AtomicLong(1L));
+
+        Field rematchLocksField = GameService.class.getDeclaredField("rematchResolutionLocks");
+        rematchLocksField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> rematchLocks = (Map<String, Object>) rematchLocksField.get(gameService);
+        rematchLocks.put(gameId, new Object());
+
+        Field abilityCountsField = GameService.class.getDeclaredField("abilityTimerCounts");
+        abilityCountsField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<String, AtomicLong> abilityCounts =
+                (Map<String, AtomicLong>) abilityCountsField.get(gameService);
+        abilityCounts.put(gameId, new AtomicLong(4L));
+
+        Method resolve = GameService.class.getDeclaredMethod("resolveRematchDecisionLocked", String.class, Game.class, Long.class);
+        resolve.setAccessible(true);
+
+        assertDoesNotThrow(() -> resolve.invoke(gameService, gameId, game, null));
+        assertEquals(GameStatus.ROUND_ENDED, game.getStatus());
+        assertFalse(rematchTimerCounts.containsKey(gameId));
+        assertFalse(rematchLocks.containsKey(gameId));
+        assertFalse(abilityCounts.containsKey(gameId));
     }
 
     @Test
