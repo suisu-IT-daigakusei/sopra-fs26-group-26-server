@@ -2,9 +2,9 @@ package ch.uzh.ifi.hase.soprafs26.repository;
 
 import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
+import ch.uzh.ifi.hase.soprafs26.support.PostgresDataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.jpa.test.autoconfigure.TestEntityManager;
 
 import java.util.List;
@@ -12,7 +12,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@DataJpaTest
+@PostgresDataJpaTest
 public class GameRepositoryIntegrationTest {
 
     @Autowired
@@ -46,4 +46,3 @@ public class GameRepositoryIntegrationTest {
         assertTrue(result.stream().anyMatch(game -> game.getId().equals(activeForPlayerOne.getId())));
     }
 }
-

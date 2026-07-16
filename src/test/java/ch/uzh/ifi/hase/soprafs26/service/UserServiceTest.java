@@ -121,6 +121,8 @@ public class UserServiceTest {
         assertEquals(10, createdUser.getMusicVolume());
         assertEquals(30, createdUser.getSoundEffectsVolume());
 		assertNotNull(createdUser.getToken());
+		assertTrue(createdUser.getPassword().startsWith("{bcrypt}"));
+		assertNotEquals("TestPassword#1", createdUser.getPassword());
 		//assertEquals(UserStatus.OFFLINE, createdUser.getStatus());
 	}
 
@@ -291,6 +293,7 @@ public class UserServiceTest {
 
         assertEquals("trimUser", loggedIn.getUsername());
         assertEquals(UserStatus.ONLINE, loggedIn.getStatus());
+        assertTrue(loggedIn.getPassword().startsWith("{bcrypt}"));
         Mockito.verify(userRepository, Mockito.times(1)).findByUsername("trimUser");
         Mockito.verify(userRepository, Mockito.times(1)).save(existing);
     }
@@ -601,7 +604,8 @@ public class UserServiceTest {
         // old user object updated with attribute values from new one
         userService.updateUser(42L, passwordOnly);
         assertEquals(true, user.getIsPublicLog());
-        assertEquals("NewPass#1", user.getPassword());
+        assertTrue(user.getPassword().startsWith("{bcrypt}"));
+        assertNotEquals("NewPass#1", user.getPassword());
     }
 
     @Test

@@ -92,8 +92,7 @@ public class ServerSettingsProperties {
     @NotEmpty
     private List<String> corsAllowedOrigins = new ArrayList<>(List.of(
             "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "https://sopra-fs26-group-26-client.vercel.app"
+            "http://127.0.0.1:3000"
     ));
 
     public int getGameSchedulerThreadPoolSize() {

@@ -12,15 +12,10 @@ import java.util.List;
 
 @Repository("gameRepository")
 public interface GameRepository extends JpaRepository<Game, String> {
-    @Query(value = "SELECT * FROM games WHERE "
-            + "REPLACE(CAST(status AS VARCHAR), ' ', '') <> :excludedStatusName "
-            + "AND REPLACE(CAST(status AS VARCHAR), ' ', '') <> :excludedStatusOrdinal "
-            + "AND ("
-            + "REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') = CONCAT('[', :playerId, ']') "
-            + "OR REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') LIKE CONCAT('[', :playerId, ',%') "
-            + "OR REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') LIKE CONCAT('%,', :playerId, ',%') "
-            + "OR REPLACE(CAST(ordered_player_ids AS VARCHAR), ' ', '') LIKE CONCAT('%,', :playerId, ']')"
-            + ")",
+    @Query(value = "SELECT * FROM games "
+            + "WHERE status <> :excludedStatusName "
+            + "AND status <> :excludedStatusOrdinal "
+            + "AND ordered_player_ids @> jsonb_build_array(CAST(:playerId AS bigint))",
             nativeQuery = true)
     List<Game> findGamesByPlayerIdExcludingStatus(@Param("playerId") Long playerId,
                                                    @Param("excludedStatusName") String excludedStatusName,

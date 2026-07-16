@@ -46,20 +46,6 @@ class BuildInfoControllerTest {
     }
 
     @Test
-    void getBuildInfo_usesGaeVersionWhenCommitMetadataIsMissing() {
-        BuildInfoController controller = new BuildInfoController(
-            () -> Map.of("GAE_VERSION", "release-20260520"),
-            List::of
-        );
-
-        Map<String, String> result = controller.getBuildInfo();
-
-        assertEquals("release-20260520", result.get("commitId"));
-        assertEquals("--------", result.get("date"));
-        assertEquals("--:--", result.get("time"));
-    }
-
-    @Test
     void getBuildInfo_returnsUnknownWhenNoSourceIsAvailable() {
         BuildInfoController controller = new BuildInfoController(Map::of, List::of);
 

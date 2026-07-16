@@ -26,7 +26,7 @@ public class Game {
     @Id
     // generate a random id
     @GeneratedValue(strategy = GenerationType.UUID)
-    @Column(nullable = false, unique = true)
+    @Column(nullable = false, unique = true, length = 36)
     private String id;
 
     // deckofcards API id. null for fallback
@@ -58,7 +58,8 @@ public class Game {
     private Card drawnCard;
 
     // game starts with a short intro before entering initial peek
-    @Column(nullable = false)
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 32)
     private GameStatus status = GameStatus.INTRO;
 
     // Per user: true after successful initial peek (no second initial peek)

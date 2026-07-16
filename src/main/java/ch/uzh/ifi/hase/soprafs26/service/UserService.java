@@ -5,6 +5,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -29,6 +31,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.LocalDate;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -46,6 +50,8 @@ import java.util.concurrent.atomic.AtomicLong;
 @Service
 @Transactional
 public class UserService {
+    private static final PasswordEncoder PASSWORD_ENCODER =
+            PasswordEncoderFactories.createDelegatingPasswordEncoder();
     private static final long HEARTBEAT_WRITE_THROTTLE_SECONDS = 10;
     // Ranking aggregation scans all sessions; keep this coarse to avoid hot /users spikes under reconnect storms.
     private static final long RANKING_RECOMPUTE_MIN_INTERVAL_MS = 300000;
@@ -227,6 +233,35 @@ public class UserService {
         if (!AuthValidationRules.CREDENTIAL_FORMAT_PATTERN.matcher(password).matches()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, AuthValidationRules.PASSWORD_HINT);
         }
+    }
+
+    private boolean passwordMatchesAndUpgrade(User user, String candidatePassword) {
+        String storedPassword = user == null ? null : user.getPassword();
+        if (storedPassword == null || candidatePassword == null) {
+            return false;
+        }
+
+        if (storedPassword.startsWith("{")) {
+            try {
+                if (!PASSWORD_ENCODER.matches(candidatePassword, storedPassword)) {
+                    return false;
+                }
+                if (PASSWORD_ENCODER.upgradeEncoding(storedPassword)) {
+                    user.setPassword(PASSWORD_ENCODER.encode(candidatePassword));
+                }
+                return true;
+            } catch (IllegalArgumentException ignored) {
+                return false;
+            }
+        }
+
+        boolean legacyMatch = MessageDigest.isEqual(
+                storedPassword.getBytes(StandardCharsets.UTF_8),
+                candidatePassword.getBytes(StandardCharsets.UTF_8));
+        if (legacyMatch) {
+            user.setPassword(PASSWORD_ENCODER.encode(candidatePassword));
+        }
+        return legacyMatch;
     }
 
     private boolean isUserInPlayingLobby(Long userId) {
@@ -759,7 +794,8 @@ public class UserService {
 	public User createUser(User newUser) {
         String normalizedUsername = normalizeAndValidateUsername(newUser.getUsername());
         newUser.setUsername(normalizedUsername);
-        validatePassword(newUser.getPassword());
+        String rawPassword = newUser.getPassword();
+        validatePassword(rawPassword);
         if (newUser.getBio() != null) {
             String normalizedBio = newUser.getBio().trim();
             if (normalizedBio.length() > MAX_BIO_LENGTH) {
@@ -773,6 +809,7 @@ public class UserService {
 		newUser.setStatus(UserStatus.ONLINE); // neuer User ist sofort ONLINE
         newUser.setCreationDate(LocalDate.now()); // setzt heutiges datum
 		checkIfUserExists(newUser); // schaut ob dese user beriets exisiter
+		newUser.setPassword(PASSWORD_ENCODER.encode(rawPassword));
 		// saves the given entity but data is only persisted in the database once
         // speichert in datenbank
 		newUser = userRepository.save(newUser);
@@ -838,7 +875,7 @@ public class UserService {
         boolean shouldRefreshLobbyPresentation = false;
         if (patch.password() != null) {
             validatePassword(patch.password());
-            user.setPassword(patch.password());
+            user.setPassword(PASSWORD_ENCODER.encode(patch.password()));
         }
         if (patch.bio() != null) {
             String normalizedBio = patch.bio().trim();
@@ -924,7 +961,7 @@ public class UserService {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
         }
         User user = userRepository.findByUsername(normalizedUsername);
-        if (user == null || !user.getPassword().equals(password)) {
+        if (user == null || !passwordMatchesAndUpgrade(user, password)) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
         }
 

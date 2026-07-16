@@ -6,6 +6,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -40,6 +41,20 @@ public class Application {
 				serverSettings.getGameSchedulerThreadPoolSize());
 		// Immediate queue removal for canceled timers avoids delayed-task buildup under reconnect churn.
 		scheduler.setRemoveOnCancelPolicy(true);
+		scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+		scheduler.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+		return scheduler;
+	}
+
+	@Bean
+	public static ThreadPoolTaskScheduler taskScheduler(
+			ObjectProvider<ServerSettingsProperties> serverSettingsProvider) {
+		ServerSettingsProperties serverSettings = serverSettingsProvider
+				.getIfAvailable(ServerSettingsProperties::new);
+		ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+		scheduler.setPoolSize(Math.max(2, serverSettings.getGameSchedulerThreadPoolSize()));
+		scheduler.setRemoveOnCancelPolicy(true);
+		scheduler.setWaitForTasksToCompleteOnShutdown(false);
 		scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
 		scheduler.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
 		return scheduler;

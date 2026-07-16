@@ -1,0 +1,44 @@
+name: cabo
+
+services:
+  database:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cabo}
+      POSTGRES_USER: ${POSTGRES_USER:-cabo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cabo-local-dev}
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      # PostgreSQL 18 declares version-specific storage below this parent directory.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+
+  server:
+    profiles: [server]
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: production
+      DB_URL: jdbc:postgresql://database:5432/${POSTGRES_DB:-cabo}
+      DB_USERNAME: ${POSTGRES_USER:-cabo}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-cabo-local-dev}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+    ports:
+      - '127.0.0.1:${SERVER_PORT:-8080}:8080'
+
+volumes:
+  postgres-data:
+    name: cabo-postgres-data
+

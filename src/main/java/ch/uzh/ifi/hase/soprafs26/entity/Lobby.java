@@ -18,7 +18,7 @@ public class Lobby implements Serializable {
     private static final long serialVersionUID = 1L;
 
     @Id
-    @GeneratedValue
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @Column(nullable = false, unique = true)
@@ -41,6 +41,8 @@ public class Lobby implements Serializable {
     // Users kicked by host from this waiting lobby.
     // They may rejoin only through an explicit host invite flow.
     @ElementCollection
+    @CollectionTable(name = "lobby_kicked_user_ids", joinColumns = @JoinColumn(name = "lobby_id"))
+    @Column(name = "kicked_user_ids")
     private List<Long> kickedUserIds = new ArrayList<>();
 
     @Column(nullable = false)

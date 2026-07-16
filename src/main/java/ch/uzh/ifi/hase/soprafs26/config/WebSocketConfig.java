@@ -15,11 +15,14 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     private static final long BROKER_HEARTBEAT_INTERVAL_MS = 20_000L;
     private final StompAuthChannelInterceptor stompAuthChannelInterceptor;
     private final ServerSettingsProperties serverSettings;
+    private final ThreadPoolTaskScheduler websocketBrokerTaskScheduler;
 
     public WebSocketConfig(StompAuthChannelInterceptor stompAuthChannelInterceptor,
-                           ServerSettingsProperties serverSettings) {
+                           ServerSettingsProperties serverSettings,
+                           ThreadPoolTaskScheduler websocketBrokerTaskScheduler) {
         this.stompAuthChannelInterceptor = stompAuthChannelInterceptor;
         this.serverSettings = serverSettings;
+        this.websocketBrokerTaskScheduler = websocketBrokerTaskScheduler;
     }
 
     @Override
@@ -27,7 +30,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
         // Clients subscribe to topics here (server -> client)
         // queue is for private communication
         registry.enableSimpleBroker("/topic", "/queue")
-                .setTaskScheduler(websocketBrokerTaskScheduler())
+                .setTaskScheduler(websocketBrokerTaskScheduler)
                 .setHeartbeatValue(new long[]{BROKER_HEARTBEAT_INTERVAL_MS, BROKER_HEARTBEAT_INTERVAL_MS});
         
         // Prefix for messages sent FROM client TO server
@@ -38,10 +41,11 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        String[] allowedOrigins = serverSettings.getCorsAllowedOrigins().toArray(String[]::new);
         registry.addEndpoint("/ws-stomp")
-                .setAllowedOriginPatterns("*");
+                .setAllowedOrigins(allowedOrigins);
         registry.addEndpoint("/ws")
-                .setAllowedOriginPatterns("*")
+                .setAllowedOrigins(allowedOrigins)
                 .withSockJS();
     }
 
@@ -71,7 +75,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     }
 
     @Bean(name = "websocketBrokerTaskScheduler", destroyMethod = "shutdown")
-    public ThreadPoolTaskScheduler websocketBrokerTaskScheduler() {
+    public static ThreadPoolTaskScheduler websocketBrokerTaskScheduler(
+            ServerSettingsProperties serverSettings) {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(Math.max(2, serverSettings.getWebsocketOutboundCorePoolSize()));
         scheduler.setThreadNamePrefix("ws-broker-");
@@ -81,4 +86,3 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
         return scheduler;
     }
 }
-

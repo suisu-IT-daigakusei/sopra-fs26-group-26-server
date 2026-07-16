@@ -88,8 +88,7 @@ public class BuildInfoController {
 
         String commitId = firstNonBlank(
             firstNonBlankFromEnvironment(env, COMMIT_ENV_CANDIDATES),
-            firstNonBlankProperty(buildProperties, COMMIT_PROPERTY_CANDIDATES),
-            firstNonBlankFromEnvironment(env, "GAE_VERSION")
+            firstNonBlankProperty(buildProperties, COMMIT_PROPERTY_CANDIDATES)
         );
         if (commitId == null) {
             return unknownBuildInfo();
@@ -97,8 +96,7 @@ public class BuildInfoController {
 
         String timestamp = firstNonBlank(
             firstNonBlankFromEnvironment(env, TIMESTAMP_ENV_CANDIDATES),
-            firstNonBlankProperty(buildProperties, TIMESTAMP_PROPERTY_CANDIDATES),
-            firstNonBlankFromEnvironment(env, "GAE_DEPLOYMENT_ID")
+            firstNonBlankProperty(buildProperties, TIMESTAMP_PROPERTY_CANDIDATES)
         );
         LocalDateTime parsedTimestamp = parseTimestamp(timestamp);
 

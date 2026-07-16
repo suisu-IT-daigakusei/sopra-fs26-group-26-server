@@ -3,8 +3,11 @@ package ch.uzh.ifi.hase.soprafs26.entity;
 import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.ElementCollection;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.MappedSuperclass;
@@ -22,7 +25,7 @@ public abstract class UserProfileResponseBase implements Serializable {
     private static final long serialVersionUID = 1L;
 
     @Id
-    @GeneratedValue
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @Column
@@ -34,7 +37,8 @@ public abstract class UserProfileResponseBase implements Serializable {
     @Column(nullable = false, unique = true)
     private String token;
 
-    @Column(nullable = false)
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 32)
     private UserStatus status;
 
     @Column(nullable = false, length = 180)

@@ -17,7 +17,7 @@ public class CaboInvite implements Serializable {
     private static final long serialVersionUID = 1L;
 
     @Id
-    @GeneratedValue
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @Column(nullable = false)
@@ -30,7 +30,7 @@ public class CaboInvite implements Serializable {
     private Long lobbyId;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
+    @Column(nullable = false, length = 32)
     private CaboInviteStatus status = CaboInviteStatus.PENDING;
 
     @Column(nullable = false)
