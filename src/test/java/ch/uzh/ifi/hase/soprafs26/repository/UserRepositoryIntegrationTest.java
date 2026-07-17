@@ -3,6 +3,7 @@ package ch.uzh.ifi.hase.soprafs26.repository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.jpa.test.autoconfigure.TestEntityManager;
+import org.springframework.data.domain.PageRequest;
 
 import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
@@ -13,6 +14,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import jakarta.persistence.PersistenceException;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Set;
 
 @PostgresDataJpaTest
 public class UserRepositoryIntegrationTest {
@@ -103,5 +108,37 @@ public class UserRepositoryIntegrationTest {
 		assertEquals(7, loaded.getGamesWon());
 		assertEquals(5, loaded.getGamesLost());
 		assertEquals(340, loaded.getTotalPointsAccumulated());
+	}
+
+	@Test
+	public void findIdleCandidates_excludesOfflineAndSpectating_andHonorsPageBound() {
+		Instant now = Instant.now();
+		User oldestOnline = persistHeartbeatUser("idleone", UserStatus.ONLINE, now.minusSeconds(900));
+		persistHeartbeatUser("idletwo", UserStatus.ONLINE, now.minusSeconds(800));
+		persistHeartbeatUser("spectator", UserStatus.SPECTATING, now.minusSeconds(1000));
+		persistHeartbeatUser("offline", UserStatus.OFFLINE, now.minusSeconds(1100));
+		persistHeartbeatUser("recent", UserStatus.ONLINE, now.minusSeconds(10));
+		entityManager.flush();
+
+		List<User> candidates = userRepository.findIdleCandidates(
+				now.minusSeconds(300),
+				Set.of(UserStatus.OFFLINE, UserStatus.SPECTATING),
+				PageRequest.of(0, 1));
+
+		assertEquals(1, candidates.size());
+		assertEquals(oldestOnline.getId(), candidates.get(0).getId());
+	}
+
+	private User persistHeartbeatUser(String username, UserStatus status, Instant heartbeat) {
+		User user = new User();
+		user.setName(username);
+		user.setUsername(username);
+		user.setStatus(status);
+		user.setToken("token-" + username);
+		user.setPassword("password");
+		user.setCreationDate(java.time.LocalDate.now());
+		user.setLastHeartbeat(heartbeat);
+		entityManager.persist(user);
+		return user;
 	}
 }

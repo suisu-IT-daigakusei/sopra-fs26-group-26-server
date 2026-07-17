@@ -100,6 +100,11 @@ public class LobbyServiceTest {
 		// by default return empty list
 		Mockito.when(lobbyRepository.findByStatusAndParticipantId(Mockito.anyString(), Mockito.anyLong()))
 				.thenReturn(List.of());
+		Mockito.when(lobbyRepository.findBySessionIdForUpdate(Mockito.anyString()))
+				.thenAnswer(invocation -> Optional.ofNullable(
+						lobbyRepository.findBySessionId(invocation.getArgument(0))));
+		Mockito.when(lobbyRepository.findByIdForUpdate(Mockito.anyLong()))
+				.thenAnswer(invocation -> lobbyRepository.findById(invocation.getArgument(0)));
 	}
 
 	private record FreshRematchThreePlayerFixture(Lobby playingLobby, User p1, User p2, User p3) {
@@ -460,6 +465,53 @@ public class LobbyServiceTest {
 		assertEquals(UserStatus.PLAYING, u2.getStatus());
 		Mockito.verify(lobbyEventPublisher, Mockito.times(1)).broadcastLobbyUpdate(Mockito.eq(22L), Mockito.any());
 		Mockito.verify(onlineUsersEventPublisher, Mockito.times(1)).broadcastOnlineUsers();
+	}
+
+	@Test
+	public void startGameAtomically_locksStartsAndTransitionsOnce() {
+		User host = new User();
+		host.setId(1L);
+		host.setStatus(UserStatus.LOBBY);
+		User guest = new User();
+		guest.setId(2L);
+		guest.setStatus(UserStatus.LOBBY);
+
+		Lobby lobby = new Lobby();
+		lobby.setId(10L);
+		lobby.setSessionId("S1");
+		lobby.setSessionHostUserId(1L);
+		lobby.setStatus("WAITING");
+		lobby.setPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+		lobby.setPlayerReadyByUserId(new HashMap<>(Map.of(1L, true, 2L, true)));
+
+		Game game = new Game();
+		game.setId("game-1");
+		game.setStatus(GameStatus.INTRO);
+
+		Mockito.when(userRepository.findByToken("host-token")).thenReturn(host);
+		Mockito.doReturn(Optional.of(lobby))
+				.when(lobbyRepository).findBySessionIdForUpdate("S1");
+		Mockito.when(gameService.startGame(List.of(1L, 2L), lobby)).thenReturn(game);
+		Mockito.when(lobbyRepository.save(Mockito.any(Lobby.class)))
+				.thenAnswer(invocation -> invocation.getArgument(0));
+		Mockito.when(userRepository.findAllById(Mockito.anyIterable())).thenReturn(List.of(host, guest));
+		Mockito.when(userRepository.saveAll(Mockito.anyIterable()))
+				.thenAnswer(invocation -> invocation.getArgument(0));
+
+		Game result = lobbyService.startGameAtomically("host-token", "S1");
+
+		assertEquals(game, result);
+		assertEquals("PLAYING", lobby.getStatus());
+		assertEquals(UserStatus.PLAYING, host.getStatus());
+		assertEquals(UserStatus.PLAYING, guest.getStatus());
+		Mockito.verify(lobbyRepository).findBySessionIdForUpdate("S1");
+		Mockito.verify(gameService).startGame(List.of(1L, 2L), lobby);
+
+		ResponseStatusException retry = assertThrows(
+				ResponseStatusException.class,
+				() -> lobbyService.startGameAtomically("host-token", "S1"));
+		assertEquals(HttpStatus.CONFLICT, retry.getStatusCode());
+		Mockito.verify(gameService, Mockito.times(1)).startGame(Mockito.anyList(), Mockito.eq(lobby));
 	}
 
 	// player can leave lobby, host migrates if host leaves
@@ -1404,6 +1456,26 @@ public class LobbyServiceTest {
 		assertFalse(result.containsKey(2L));      // Filtered out because session was null
 		assertFalse(result.containsKey(3L));      // Filtered out because session was blank
 		assertFalse(result.containsKey(4L));      // Filtered out because they had no lobby
+	}
+
+	@Test
+	public void resolveJoinableSessions_privateLobbyHidesSessionButKeepsPresence() {
+		Lobby privatePlayingLobby = new Lobby();
+		privatePlayingLobby.setId(40L);
+		privatePlayingLobby.setSessionId("PRIVATE-PLAYING");
+		privatePlayingLobby.setStatus("PLAYING");
+		privatePlayingLobby.setIsPublic(false);
+		privatePlayingLobby.setPlayerIds(new ArrayList<>(List.of(1L)));
+
+		Mockito.when(lobbyRepository.findByStatus("PLAYING"))
+				.thenReturn(List.of(privatePlayingLobby));
+		Mockito.when(lobbyRepository.findByStatus("WAITING")).thenReturn(List.of());
+
+		LobbyService.LobbyPresenceLookupResult result =
+				lobbyService.resolveJoinableSessionsAndPresenceForUsers(List.of(1L));
+
+		assertFalse(result.joinableSessionIdByUserId().containsKey(1L));
+		assertEquals(UserStatus.PLAYING, result.statusByUserId().get(1L));
 	}
 
 	@Test

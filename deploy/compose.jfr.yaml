@@ -1,0 +1,6 @@
+services:
+  server:
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -Xms128m -Xmx1024m -XX:+ExitOnOutOfMemoryError
+        -XX:StartFlightRecording=filename=/tmp/cabo.jfr,duration=${JFR_DURATION:-5m},settings=profile,dumponexit=true

@@ -31,6 +31,7 @@ public class MoveService {
     private static final int MAX_SESSION_LOG_MOVES = 500;
     private static final long STALE_MOVE_CLEANUP_MIN_INTERVAL_MS = 30_000L;
     private static final long ENDED_SESSION_MOVE_RETENTION_HOURS = 24L;
+    private static final int STALE_MOVE_CLEANUP_BATCH_SIZE = 1000;
     private static final int STALE_MOVE_CLEANUP_MAX_BATCHES_PER_RUN = 5;
 
     private final MoveRepository moveRepository;
@@ -131,11 +132,11 @@ public class MoveService {
     }
 
     @Scheduled(fixedDelay = 60000)
+    @Transactional
     public void cleanupStaleSessionMovesJob() {
         maybeCleanupStaleSessionMoves();
     }
 
-    @Transactional
     void maybeCleanupStaleSessionMoves() {
         long nowMs = System.currentTimeMillis();
         long previousCleanupMs = lastMoveCleanupMs.get();
@@ -148,25 +149,10 @@ public class MoveService {
 
         Instant cutoff = Instant.now().minusSeconds(ENDED_SESSION_MOVE_RETENTION_HOURS * 3600L);
         for (int batch = 0; batch < STALE_MOVE_CLEANUP_MAX_BATCHES_PER_RUN; batch++) {
-            List<Session> staleEndedSessions = sessionRepository
-                    .findTop200ByIsEndedTrueAndStartTimeBeforeOrderByStartTimeAsc(cutoff);
-            if (staleEndedSessions == null || staleEndedSessions.isEmpty()) {
-                return;
-            }
-
-            List<String> staleSessionIds = new ArrayList<>();
-            for (Session session : staleEndedSessions) {
-                if (session == null || session.getSessionId() == null || session.getSessionId().isBlank()) {
-                    continue;
-                }
-                staleSessionIds.add(session.getSessionId());
-            }
-
-            if (!staleSessionIds.isEmpty()) {
-                moveRepository.deleteAllBySessionIdsBulk(staleSessionIds);
-            }
-
-            if (staleEndedSessions.size() < 200) {
+            int deleted = moveRepository.deleteStaleEndedSessionMovesBatch(
+                    cutoff,
+                    STALE_MOVE_CLEANUP_BATCH_SIZE);
+            if (deleted < STALE_MOVE_CLEANUP_BATCH_SIZE) {
                 return;
             }
         }

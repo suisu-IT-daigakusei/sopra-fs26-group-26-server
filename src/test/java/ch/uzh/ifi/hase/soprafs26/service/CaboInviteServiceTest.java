@@ -111,6 +111,8 @@ public class CaboInviteServiceTest {
 
         Lobby waitingLobby = new Lobby();
         waitingLobby.setId(lobbyId);
+        waitingLobby.setSessionId("session-xyz-123");
+        waitingLobby.setSessionHostUserId(hostId);
         Mockito.when(lobbyService.requireWaitingLobbyForHost(hostId)).thenReturn(waitingLobby);
 
         Mockito.when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", inviteeId)).thenReturn(false);
@@ -130,11 +132,6 @@ public class CaboInviteServiceTest {
         savedInvite.setCreatedAt(java.time.LocalDateTime.now()); 
         
         Mockito.when(caboInviteRepository.save(any(CaboInvite.class))).thenReturn(savedInvite);
-
-        Lobby structuralLobby = new Lobby();
-        structuralLobby.setSessionId("session-xyz-123");
-        structuralLobby.setSessionHostUserId(hostId);
-        Mockito.when(lobbyService.findLobbyById(lobbyId)).thenReturn(Optional.of(structuralLobby));
 
         CaboInviteCreateDTO body = new CaboInviteCreateDTO();
         body.setToUserId(inviteeId);
@@ -313,8 +310,9 @@ public class CaboInviteServiceTest {
         // Stub out the user name lookup mapping branch
         User user2 = new User(); user2.setUsername("userTwo");
         User user3 = new User(); user3.setUsername("userThree");
-        Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(user2));
-        Mockito.when(userRepository.findById(3L)).thenReturn(Optional.of(user3));
+        user2.setId(2L);
+        user3.setId(3L);
+        Mockito.when(userRepository.findAllById(Mockito.anyCollection())).thenReturn(List.of(user2, user3));
 
         // Condition where an accepted player left the waiting lobby, fallback logic changes state string to DECLINED
         Mockito.when(lobbyService.getWaitingSessionIdIfPlayerInLobby(100L, 3L)).thenReturn("  ");
@@ -362,15 +360,17 @@ public class CaboInviteServiceTest {
         // Mock lobby configuration
         Mockito.when(lobbyService.isLobbyWaiting(100L)).thenReturn(true);
         Lobby currentLobby = new Lobby();
+        currentLobby.setId(100L);
+        currentLobby.setStatus("WAITING");
         currentLobby.setSessionId("session-abc");
         currentLobby.setSessionHostUserId(1L);
-        Mockito.when(lobbyService.findLobbyById(100L)).thenReturn(Optional.of(currentLobby));
+        Mockito.when(lobbyRepository.findAllById(Mockito.anyCollection())).thenReturn(List.of(currentLobby));
 
         // Mock the fromUser properties
         User host = new User();
         host.setId(1L);
         host.setUsername("hostUser");
-        Mockito.when(userRepository.findById(1L)).thenReturn(Optional.of(host));
+        Mockito.when(userRepository.findAllById(Mockito.anyCollection())).thenReturn(List.of(host));
 
         // Act
         List<CaboInvitePendingDTO> list = caboInviteService.getPendingInvitesForUser("invitee-token", 2L);

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM gradle:9.6.1-jdk25 AS build
 
 WORKDIR /home/gradle/project
@@ -10,7 +11,8 @@ COPY --chown=gradle:gradle gradle ./gradle
 RUN sed -i 's/\r$//' ./gradlew && chmod +x ./gradlew
 
 COPY --chown=gradle:gradle src ./src
-RUN ./gradlew --no-daemon --max-workers=1 bootJar -x test
+RUN --mount=type=cache,target=/home/gradle/.gradle,uid=1000,gid=1000 \
+    ./gradlew --no-daemon --max-workers=1 bootJar -x test
 
 FROM eclipse-temurin:25-jre-noble AS runtime
 

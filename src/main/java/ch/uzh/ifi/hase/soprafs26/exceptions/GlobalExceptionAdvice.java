@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.transaction.TransactionSystemException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -38,6 +39,16 @@ public class GlobalExceptionAdvice extends ResponseEntityExceptionHandler {
                 "error", "Too Many Requests",
                 "message", ex.getReason() == null ? "Too many requests" : ex.getReason());
         return new ResponseEntity<>(body, headers, HttpStatus.TOO_MANY_REQUESTS);
+    }
+
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    protected ResponseEntity<Map<String, Object>> handleOptimisticLockConflict(
+            ObjectOptimisticLockingFailureException ex) {
+        Map<String, Object> body = Map.of(
+                "status", HttpStatus.CONFLICT.value(),
+                "error", "Conflict",
+                "message", "Game state changed concurrently; refresh and retry");
+        return new ResponseEntity<>(body, HttpStatus.CONFLICT);
     }
 
     @ExceptionHandler(TransactionSystemException.class)

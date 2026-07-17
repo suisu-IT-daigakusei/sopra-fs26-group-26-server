@@ -1,0 +1,17 @@
+[Unit]
+Description=Prune old Cabo Docker build cache and unused images
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/cabo/sopra-fs26-group-26-server/deploy/scripts/docker-maintenance.py
+User=root
+Group=root
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

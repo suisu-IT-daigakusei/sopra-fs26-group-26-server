@@ -12,20 +12,22 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
-import ch.uzh.ifi.hase.soprafs26.entity.Session;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendOnlineSummaryDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendRequestIncomingDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPutDTO;
 import ch.uzh.ifi.hase.soprafs26.repository.LobbyRepository;
-import ch.uzh.ifi.hase.soprafs26.repository.SessionRepository;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.UserListHit;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.UserListPage;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.UserListQuery;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 import ch.uzh.ifi.hase.soprafs26.util.AuthValidationRules;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -34,7 +36,6 @@ import java.util.UUID;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.LocalDate;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * User Service
@@ -52,9 +53,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class UserService {
     private static final PasswordEncoder PASSWORD_ENCODER =
             PasswordEncoderFactories.createDelegatingPasswordEncoder();
-    private static final long HEARTBEAT_WRITE_THROTTLE_SECONDS = 10;
-    // Ranking aggregation scans all sessions; keep this coarse to avoid hot /users spikes under reconnect storms.
-    private static final long RANKING_RECOMPUTE_MIN_INTERVAL_MS = 300000;
+    private static final long HEARTBEAT_WRITE_THROTTLE_SECONDS = 30;
     private static final int MAX_BIO_LENGTH = 180;
     private static final List<String> CHARACTER_COLOR_ORDER = List.of(
             "navy_blue",
@@ -146,25 +145,48 @@ public class UserService {
         }
     }
 
+    public record PagedUser(
+            User user,
+            Integer globalRank,
+            UserStatus visibleStatus,
+            String joinableSessionId) {
+
+        public PagedUser(User user, Integer globalRank) {
+            this(user, globalRank, null, null);
+        }
+    }
+
+    public record PagedUsers(
+            List<PagedUser> items,
+            int page,
+            int size,
+            long totalElements,
+            int totalPages,
+            boolean hasNext) {
+
+        public PagedUsers {
+            items = items == null ? List.of() : List.copyOf(items);
+        }
+    }
+
 	private final Logger log = LoggerFactory.getLogger(UserService.class);
 
 	private final UserRepository userRepository;
     private final LobbyRepository lobbyRepository;
-    private final SessionRepository sessionRepository;
+    private final UserListQueryRepository userListQueryRepository;
     private final OnlineUsersEventPublisher onlineUsersEventPublisher;
     private final DisconnectService disconnectService;
-    private final AtomicLong lastRankingRecomputeMs = new AtomicLong(0L);
     private final LobbyService lobbyService;
 
 	public UserService(@Qualifier("userRepository") UserRepository userRepository,
                        @Qualifier("lobbyRepository") LobbyRepository lobbyRepository,
-                       @Lazy SessionRepository sessionRepository,
+	                   UserListQueryRepository userListQueryRepository,
 	                   OnlineUsersEventPublisher onlineUsersEventPublisher,
                        @Lazy DisconnectService disconnectService,
                        @Lazy LobbyService lobbyService) {
 		this.userRepository = userRepository;
         this.lobbyRepository = lobbyRepository;
-        this.sessionRepository = sessionRepository;
+        this.userListQueryRepository = userListQueryRepository;
 		this.onlineUsersEventPublisher = onlineUsersEventPublisher;
 		this.disconnectService = disconnectService;
         this.lobbyService = lobbyService;
@@ -539,255 +561,102 @@ public class UserService {
     // holt alle user aus Datenbank und gibt sie dem controller
 	public List<User> getUsers() {
         List<User> users = this.userRepository.findAll();
-        maybeRecalculateGlobalRankingFromSessions(users);
+
+        // Public user cards need preferred colors, but not the private music
+        // blacklist. @BatchSize on the collection prevents an N+1 query.
+        for (User user : users) {
+            if (user != null && user.getPreferredColorPriority() != null) {
+                user.getPreferredColorPriority().size();
+            }
+        }
+
+        refreshDerivedStatisticsAndRanking(users);
 		return users;
 	}
 
-    private void maybeRecalculateGlobalRankingFromSessions(List<User> users) {
+    @Transactional(readOnly = true)
+    public PagedUsers getUsersPage(UserListQuery query) {
+        UserListPage queriedPage = userListQueryRepository.findPage(query);
+        List<Long> orderedIds = queriedPage.hits().stream()
+                .map(UserListHit::userId)
+                .toList();
+        Map<Long, User> usersById = new LinkedHashMap<>();
+        for (User user : userRepository.findAllById(orderedIds)) {
+            if (user != null && user.getId() != null) {
+                usersById.put(user.getId(), user);
+            }
+        }
+
+        List<PagedUser> orderedUsers = new ArrayList<>(orderedIds.size());
+        for (UserListHit hit : queriedPage.hits()) {
+            User user = usersById.get(hit.userId());
+            if (user == null) {
+                continue;
+            }
+            if (user.getPreferredColorPriority() != null) {
+                user.getPreferredColorPriority().size();
+            }
+            orderedUsers.add(new PagedUser(
+                    user,
+                    hit.globalRank(),
+                    hit.visibleStatus(),
+                    hit.joinableSessionId()));
+        }
+
+        long totalPagesLong = queriedPage.totalElements() / query.size();
+        if (queriedPage.totalElements() % query.size() != 0L) {
+            totalPagesLong++;
+        }
+        int totalPages = (int) Math.min(Integer.MAX_VALUE, totalPagesLong);
+        boolean hasNext = ((long) query.page() + 1L) * query.size() < queriedPage.totalElements();
+        return new PagedUsers(
+                orderedUsers,
+                query.page(),
+                query.size(),
+                queriedPage.totalElements(),
+                totalPages,
+                hasNext);
+    }
+
+    /**
+     * Derives ranking fields from counters maintained when sessions end.
+     * The interactive /users request therefore never scans historical sessions.
+     */
+    private void refreshDerivedStatisticsAndRanking(List<User> users) {
         if (users == null || users.isEmpty()) {
             return;
         }
-        long nowMs = System.currentTimeMillis();
-        long previousRecomputeMs = lastRankingRecomputeMs.get();
-        if (previousRecomputeMs > 0L && nowMs - previousRecomputeMs < RANKING_RECOMPUTE_MIN_INTERVAL_MS) {
-            return;
-        }
-        if (!lastRankingRecomputeMs.compareAndSet(previousRecomputeMs, nowMs)) {
-            return;
-        }
-        recalculateGlobalRankingFromSessions(users);
-    }
 
-    // #102: global ranking 
-    // gamesWon, averageScorePerSession - based on totalScore from ended sessions
-    // roundsWon, averageScorePerRound - from all rounds of all sessions (ended + ongoing)
-    private void recalculateGlobalRankingFromSessions(List<User> users) {
-        if (users == null || users.isEmpty() || sessionRepository == null) {
-            return;
-        }
-
-        Map<Long, Integer> sessionWinsByUserId = new HashMap<>();
-        Map<Long, Long> cumulativeSessionScoreByUserId = new HashMap<>();
-        Map<Long, Integer> playedSessionsByUserId = new HashMap<>();
-
-        Map<Long, Integer> roundWinsByUserId = new HashMap<>();
-        Map<Long, Long> cumulativeRoundScoreByUserId = new HashMap<>();
-        Map<Long, Integer> roundsPlayedByUserId = new HashMap<>();
-
-        for (Session session : sessionRepository.findAll()) {
-            // skip invalid sessions
-            if (session == null) {
-                continue;
-            }
-
-            // get round scores for session
-            List<Map<Long, Integer>> perRound = session.getUserScoresPerRound();
-            Map<Long, Integer> recomputedTotalScoreByUserId = new HashMap<>();
-
-            // skip invalid per round scores
-            if (perRound != null) {
-                // get the "user id - score" map for each round of current session
-                for (Map<Long, Integer> roundMap : perRound) {
-                    // skip invalid round score maps
-                    if (roundMap == null || roundMap.isEmpty()) {
-                        continue;
-                    }
-                    // get winning score for the round
-                    Integer bestRoundScore = null;
-                    // iterate all scores of current round
-                    for (Integer s : roundMap.values()) {
-                        // skip invalid scores
-                        if (s == null) {
-                            continue;
-                        }
-                        // update best score for the round
-                        if (bestRoundScore == null || s < bestRoundScore) {
-                            bestRoundScore = s;
-                        }
-                    }
-                    // if nothing was written to the best round score - skip
-                    if (bestRoundScore == null) {
-                        continue;
-                    }
-                    // go through "user id - score" pairs of round scores map
-                    for (Map.Entry<Long, Integer> entry : roundMap.entrySet()) {
-                        Long userId = entry.getKey();
-                        Integer score = entry.getValue();
-                        // if user id or score invalid - skip
-                        if (userId == null || score == null) {
-                            continue;
-                        }
-                        // update aggregated round metrics
-                        cumulativeRoundScoreByUserId.merge(userId, score.longValue(), Long::sum);
-                        roundsPlayedByUserId.merge(userId, 1, Integer::sum);
-                        recomputedTotalScoreByUserId.merge(userId, score, Integer::sum);
-                        // increment the round wins only when score matches best score  (or for all users that tie)
-                        if (Objects.equals(score, bestRoundScore)) {
-                            roundWinsByUserId.merge(userId, 1, Integer::sum);
-                        }
-                    }
-                }
-            }
-
-            // we now proceed to session level metrics - games won, average score per session
-            // these are calculated only over ended sessions - otherwise skip
-            if (!session.isEnded()) {
-                continue;
-            }
-
-            // get total score map (user id - total score) for current session
-            Map<Long, Integer> totalScoreByUserId = session.getTotalScoreByUserId();
-            Map<Long, Integer> normalizedTotalScoreByUserId = new HashMap<>();
-            if (totalScoreByUserId != null) {
-                for (Map.Entry<Long, Integer> entry : totalScoreByUserId.entrySet()) {
-                    Long userId = entry.getKey();
-                    Integer score = entry.getValue();
-                    if (userId == null || score == null) {
-                        continue;
-                    }
-                    normalizedTotalScoreByUserId.put(userId, score);
-                }
-            }
-            for (Map.Entry<Long, Integer> entry : recomputedTotalScoreByUserId.entrySet()) {
-                Long userId = entry.getKey();
-                Integer score = entry.getValue();
-                if (userId == null || score == null) {
-                    continue;
-                }
-                normalizedTotalScoreByUserId.putIfAbsent(userId, score);
-            }
-
-            // if total score map is invalid - skip
-            if (normalizedTotalScoreByUserId.isEmpty()) {
-                continue;
-            }
-
-            // get best total score for current session
-            Integer bestSessionScore = normalizedTotalScoreByUserId.values().stream()
-                    .filter(Objects::nonNull) // leave out nulls 
-                    .min(Integer::compareTo) // get smallest total score
-                    .orElse(null); // if nothing is left after filtering - return null
-            // if best session score is invalid - skip
-            if (bestSessionScore == null) {
-                continue;
-            }
-            // iterate all "user id - totalScore" pairs for current session
-            for (Map.Entry<Long, Integer> entry : normalizedTotalScoreByUserId.entrySet()) {
-                Long userId = entry.getKey();
-                Integer score = entry.getValue();
-                // if "user id - totalScore" pair invalid - skip
-                if (userId == null || score == null) {
-                    continue;
-                }
-                // update aggregated session metrics
-                cumulativeSessionScoreByUserId.merge(userId, score.longValue(), Long::sum);
-                playedSessionsByUserId.merge(userId, 1, Integer::sum);
-                // increment the session wins for best scoring user only (or all users that tie)
-                if (Objects.equals(score, bestSessionScore)) {
-                    sessionWinsByUserId.merge(userId, 1, Integer::sum);
-                }
-            }
-        }
-
-        
         List<User> ordered = new ArrayList<>(users);
-        Map<Long, Integer> computedGamesWonByUserId = new HashMap<>();
-        Map<Long, Integer> computedGamesPlayedByUserId = new HashMap<>();
-        Map<Long, Integer> computedGamesLostByUserId = new HashMap<>();
-        Map<Long, Integer> computedRoundsWonByUserId = new HashMap<>();
-        Map<Long, Integer> computedAverageSessionByUserId = new HashMap<>();
-        Map<Long, Integer> computedAverageRoundByUserId = new HashMap<>();
-        // per user, calculate average scores (round and session based)
-        // get win values (round and session based) from temporary maps
         for (User user : ordered) {
-            Long userId = user.getId();
-            int sessionWins = sessionWinsByUserId.getOrDefault(userId, 0);
-            int playedSessions = playedSessionsByUserId.getOrDefault(userId, 0);
-            long cumulativeSession = cumulativeSessionScoreByUserId.getOrDefault(userId, 0L);
-            int averageSession = playedSessions == 0 ? 0
-                    : (int) Math.round((double) cumulativeSession / playedSessions);
-
-            int roundsPlayed = roundsPlayedByUserId.getOrDefault(userId, 0);
-            long cumulativeRound = cumulativeRoundScoreByUserId.getOrDefault(userId, 0L);
-            int averageRound = roundsPlayed == 0 ? 0
-                    : (int) Math.round((double) cumulativeRound / roundsPlayed);
-
-            computedGamesWonByUserId.put(userId, sessionWins);
-            computedGamesPlayedByUserId.put(userId, playedSessions);
-            computedGamesLostByUserId.put(userId, Math.max(0, playedSessions - sessionWins));
-            computedRoundsWonByUserId.put(userId, roundWinsByUserId.getOrDefault(userId, 0));
-            computedAverageSessionByUserId.put(userId, averageSession);
-            computedAverageRoundByUserId.put(userId, averageRound);
+            int gamesPlayed = Math.max(0, Objects.requireNonNullElse(user.getGamesPlayed(), 0));
+            int totalPoints = Objects.requireNonNullElse(user.getTotalPointsAccumulated(), 0);
+            int averageSession = gamesPlayed == 0
+                    ? 0
+                    : (int) Math.round((double) totalPoints / gamesPlayed);
+            if (!Objects.equals(user.getAverageScorePerSession(), averageSession)) {
+                user.setAverageScorePerSession(averageSession);
+            }
         }
 
-        // order users
-        // first by games won, descending
-        // then by number of played sessions, descending
-        // then by average score over sessions, ascending
-        // then by ids, ascending
         ordered.sort(Comparator
                 .comparing(
-                        (User user) -> computedGamesWonByUserId.getOrDefault(user.getId(), 0),
+                        (User user) -> Objects.requireNonNullElse(user.getGamesWon(), 0),
                         Comparator.reverseOrder())
                 .thenComparing(
-                        (User user) -> computedGamesPlayedByUserId.getOrDefault(user.getId(), 0),
-                        Comparator.reverseOrder()
-                )
+                        (User user) -> Objects.requireNonNullElse(user.getGamesPlayed(), 0),
+                        Comparator.reverseOrder())
                 .thenComparing(
-                        (User user) -> computedAverageSessionByUserId.getOrDefault(user.getId(), 0),
+                        (User user) -> Objects.requireNonNullElse(user.getAverageScorePerSession(), 0),
                         Integer::compareTo)
                 .thenComparing(User::getId, Comparator.nullsFirst(Long::compareTo)));
 
-        // calculate and assign ranks to users, based on the above sort order
         int rank = 1;
-        boolean anyUserChanged = false;
         for (User user : ordered) {
-            Long userId = user.getId();
-            int playedSessions = computedGamesPlayedByUserId.getOrDefault(userId, 0);
-            int sessionWins = computedGamesWonByUserId.getOrDefault(userId, 0);
-            int gamesLost = computedGamesLostByUserId.getOrDefault(userId, 0);
-            int roundsWon = computedRoundsWonByUserId.getOrDefault(userId, 0);
-            int averageSession = computedAverageSessionByUserId.getOrDefault(userId, 0);
-            int averageRound = computedAverageRoundByUserId.getOrDefault(userId, 0);
-
-            boolean changed = false;
-            if (!Objects.equals(user.getGamesPlayed(), playedSessions)) {
-                user.setGamesPlayed(playedSessions);
-                changed = true;
-            }
-            if (!Objects.equals(user.getGamesWon(), sessionWins)) {
-                user.setGamesWon(sessionWins);
-                changed = true;
-            }
-            if (!Objects.equals(user.getGamesLost(), gamesLost)) {
-                user.setGamesLost(gamesLost);
-                changed = true;
-            }
-            if (!Objects.equals(user.getRoundsWon(), roundsWon)) {
-                user.setRoundsWon(roundsWon);
-                changed = true;
-            }
-            if (!Objects.equals(user.getAverageScorePerSession(), averageSession)) {
-                user.setAverageScorePerSession(averageSession);
-                changed = true;
-            }
-            if (!Objects.equals(user.getAverageScorePerRound(), averageRound)) {
-                user.setAverageScorePerRound(averageRound);
-                changed = true;
-            }
             if (!Objects.equals(user.getOverallRank(), rank)) {
                 user.setOverallRank(rank);
-                changed = true;
-            }
-
-            if (changed) {
-                userRepository.save(user);
-                anyUserChanged = true;
             }
             rank++;
-        }
-        if (anyUserChanged) {
-            userRepository.flush();
         }
     }
 
@@ -860,6 +729,24 @@ public class UserService {
 
     // sucht user anhand von ID falls nicht gefunden not found error
     public User getUserById(Long userId) { return userRepository.findById(userId).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+    }
+
+    public User getUserProfileById(Long userId) {
+        User user = getUserById(userId);
+        initializeProfileCollections(user);
+        return user;
+    }
+
+    private void initializeProfileCollections(User user) {
+        if (user == null) {
+            return;
+        }
+        if (user.getPreferredColorPriority() != null) {
+            user.getPreferredColorPriority().size();
+        }
+        if (user.getMusicBlacklist() != null) {
+            user.getMusicBlacklist().size();
+        }
     }
 // änderung des PW in datenbank
     public void updateUser(Long userId, User userInput) {
@@ -969,6 +856,7 @@ public class UserService {
         user.setStatus(resolveStatusForLogin(user.getId()));
         userRepository.save(user);
         userRepository.flush();
+        initializeProfileCollections(user);
         onlineUsersEventPublisher.broadcastOnlineUsers();
         return user;
     }
@@ -978,18 +866,19 @@ public class UserService {
             return UserStatus.ONLINE;
         }
 
-        if (lobbyRepository.existsByStatusAndPlayerId("PLAYING", userId)) {
-            return UserStatus.PLAYING;
-        }
-        if (lobbyRepository.existsByStatusAndParticipantId("PLAYING", userId)) {
-            return UserStatus.SPECTATING;
-        }
-
-        if (lobbyRepository.existsByStatusAndPlayerId("WAITING", userId)) {
-            return UserStatus.LOBBY;
-        }
-        if (lobbyRepository.existsByStatusAndParticipantId("WAITING", userId)) {
-            return UserStatus.SPECTATING;
+        List<Object[]> presenceRows = lobbyRepository.findHighestPriorityPresenceForUser(userId);
+        if (presenceRows != null && !presenceRows.isEmpty()) {
+            Object[] row = presenceRows.get(0);
+            String lobbyStatus = row != null && row.length > 0 && row[0] != null
+                    ? row[0].toString()
+                    : "";
+            boolean player = row != null && row.length > 1 && Boolean.TRUE.equals(row[1]);
+            if ("PLAYING".equals(lobbyStatus)) {
+                return player ? UserStatus.PLAYING : UserStatus.SPECTATING;
+            }
+            if ("WAITING".equals(lobbyStatus)) {
+                return player ? UserStatus.LOBBY : UserStatus.SPECTATING;
+            }
         }
 
         return UserStatus.ONLINE;
@@ -1029,7 +918,7 @@ public class UserService {
         java.time.Instant now = java.time.Instant.now();
         java.time.Instant last = user.getLastHeartbeat();
         boolean shouldSaveHeartbeat = last == null || now.isAfter(last.plusSeconds(HEARTBEAT_WRITE_THROTTLE_SECONDS));
-        boolean shouldResolveStatus = shouldSaveHeartbeat || user.getStatus() == null;
+        boolean shouldResolveStatus = user.getStatus() == null || user.getStatus() == UserStatus.OFFLINE;
         UserStatus resolvedStatus = user.getStatus() == null ? UserStatus.ONLINE : user.getStatus();
         boolean statusNeedsUpdate = false;
         if (shouldResolveStatus) {

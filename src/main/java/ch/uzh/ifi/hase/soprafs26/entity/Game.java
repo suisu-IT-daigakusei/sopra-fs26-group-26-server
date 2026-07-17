@@ -29,7 +29,15 @@ public class Game {
     @Column(nullable = false, unique = true, length = 36)
     private String id;
 
-    // deckofcards API id. null for fallback
+    /**
+     * Guards the JSON-backed game aggregate against concurrent lost updates.
+     * This is an internal persistence detail and must not change REST/WebSocket payloads.
+     */
+    @Version
+    @Column(nullable = false)
+    private Long version;
+
+    // Legacy deck API id retained for existing rows; new games always keep this null.
     @Column(nullable = true)
     private String deckApiId;
 
@@ -83,6 +91,11 @@ public class Game {
     // True when Cabo was auto-called due to timeout/disconnect (not manual button press).
     @Column(nullable = false)
     private boolean caboForcedByTimeout = false;
+
+    // Persisted session boundary for rematch rules. A completed session may start a
+    // fresh lobby, but must never continue in the already-ended session.
+    @Column(nullable = false)
+    private boolean sessionEnded = false;
 
     // tracks if the current player already used their special peek ability
     @Column(nullable = false)
@@ -139,6 +152,15 @@ public class Game {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    @JsonIgnore
+    public Long getVersion() {
+        return version;
+    }
+
+    public void setVersion(Long version) {
+        this.version = version;
     }
 
     // do not send to client
@@ -251,6 +273,14 @@ public class Game {
 
     public void setCaboForcedByTimeout(boolean caboForcedByTimeout) {
         this.caboForcedByTimeout = caboForcedByTimeout;
+    }
+
+    public boolean isSessionEnded() {
+        return sessionEnded;
+    }
+
+    public void setSessionEnded(boolean sessionEnded) {
+        this.sessionEnded = sessionEnded;
     }
 
     public boolean isSpecialPeekUsed() {

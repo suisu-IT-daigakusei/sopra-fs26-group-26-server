@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.transaction.TransactionSystemException;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.server.ResponseStatusException;
@@ -44,6 +45,19 @@ class GlobalExceptionAdviceTest {
         assertEquals(429, response.getBody().get("status"));
         assertEquals("Too Many Requests", response.getBody().get("error"));
         assertEquals("slow down", response.getBody().get("message"));
+    }
+
+    @Test
+    void handleOptimisticLockConflict_returnsRefreshable409() {
+        ObjectOptimisticLockingFailureException exception =
+                new ObjectOptimisticLockingFailureException("Game", "g-1");
+
+        ResponseEntity<Map<String, Object>> response = advice.handleOptimisticLockConflict(exception);
+
+        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+        assertEquals(409, response.getBody().get("status"));
+        assertEquals("Conflict", response.getBody().get("error"));
+        assertTrue(String.valueOf(response.getBody().get("message")).contains("refresh"));
     }
 
     @Test

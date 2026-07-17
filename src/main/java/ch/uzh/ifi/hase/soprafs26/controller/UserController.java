@@ -4,6 +4,10 @@ import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.Session;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.Direction;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.Sort;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.UserListQuery;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.View;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.AuthRulesDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendOnlineSummaryDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendRequestIncomingDTO;
@@ -12,6 +16,7 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.UserGetDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserLoginDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPostDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPutDTO;
+import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPageDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.mapper.DTOMapper;
 import ch.uzh.ifi.hase.soprafs26.service.HistoryService;
 import ch.uzh.ifi.hase.soprafs26.service.HotEndpointRateLimiter;
@@ -29,6 +34,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -37,11 +43,19 @@ import org.springframework.web.server.ResponseStatusException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
+import java.util.Locale;
+import java.util.Set;
 
 @RestController
 public class UserController {
+
+    private static final int DEFAULT_USER_PAGE_SIZE = 20;
+    private static final int MAX_USER_PAGE_SIZE = 100;
+    private static final int MAX_USER_SEARCH_LENGTH = 64;
+    private static final int MAX_USER_INCLUDE_IDS = 100;
+    private static final int MAX_USER_EXCLUDE_IDS = 20;
 
     private final UserService userService;
     private final HistoryService historyService;
@@ -95,42 +109,185 @@ public class UserController {
     @GetMapping("/users")
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
-    public List<UserGetDTO> getAllUsers(HttpServletRequest request) {
-        enforceHotReadLimit("users-list", null, request);
-        List<User> users = userService.getUsers();
+    public UserPageDTO getAllUsers(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(defaultValue = "directory") String view,
+            @RequestParam(name = "q", required = false) String search,
+            @RequestParam(name = "status", required = false) List<String> rawStatuses,
+            @RequestParam(defaultValue = "false") boolean friendsOnly,
+            @RequestParam(name = "excludeId", required = false) List<Long> rawExcludeIds,
+            @RequestParam(name = "id", required = false) List<Long> rawIncludeIds,
+            @RequestParam(required = false) String sort,
+            @RequestParam(defaultValue = "asc") String direction,
+            @RequestHeader(value = "Authorization", required = false) String token,
+            HttpServletRequest request) {
+        View parsedView = parseUserListView(view);
+        String normalizedSearch = search == null ? "" : search.trim();
+        validateUserPageBounds(page, size, normalizedSearch);
+        Set<UserStatus> statuses = parseUserStatuses(rawStatuses);
+        Set<Long> excludeIds = parseBoundedIds(rawExcludeIds, MAX_USER_EXCLUDE_IDS, "excludeId");
+        Set<Long> includeIds = parseBoundedIds(rawIncludeIds, MAX_USER_INCLUDE_IDS, "id");
+        Sort parsedSort = parseUserListSort(sort, parsedView);
+        Direction parsedDirection = parseUserListDirection(direction);
+
+        // The public directory is rate-limited by network caller rather than by
+        // the untrusted Authorization value. This must happen before a
+        // friends-only token lookup so rotating fake tokens neither bypass the
+        // limit nor allocate one rate-limit bucket per fake token.
+        enforceHotReadLimit(
+                "users-list-" + parsedView.name().toLowerCase(Locale.ROOT),
+                null,
+                request);
+
+        Long viewerId = null;
+        if (friendsOnly) {
+            User viewer = token == null || token.isBlank() ? null : userRepository.findByToken(token);
+            if (viewer == null) {
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Valid token required for friends-only users");
+            }
+            viewerId = viewer.getId();
+        }
+
+        UserService.PagedUsers userPage = userService.getUsersPage(new UserListQuery(
+                parsedView,
+                page,
+                size,
+                normalizedSearch,
+                statuses,
+                friendsOnly,
+                viewerId,
+                excludeIds,
+                includeIds,
+                parsedSort,
+                parsedDirection));
         List<UserGetDTO> userGetDTOs = new ArrayList<>();
 
-        List<Long> userIds = users.stream()
-                .map(User::getId)
-                .filter(id -> id != null)
-                .toList();
-        LobbyService.LobbyPresenceLookupResult presenceLookup =
-                lobbyService.resolveJoinableSessionsAndPresenceForUsers(userIds);
-        if (presenceLookup == null) {
-            presenceLookup = new LobbyService.LobbyPresenceLookupResult(Map.of(), Map.of());
-        }
-        Map<Long, String> joinableSessionIdByUserId = presenceLookup.joinableSessionIdByUserId();
-        if (joinableSessionIdByUserId == null) {
-            joinableSessionIdByUserId = Map.of();
-        }
-        Map<Long, UserStatus> lobbyPresenceStatusByUserId = presenceLookup.statusByUserId();
-        if (lobbyPresenceStatusByUserId == null) {
-            lobbyPresenceStatusByUserId = Map.of();
-        }
-
-        for (User user : users) {
-            UserGetDTO dto = DTOMapper.INSTANCE.convertEntityToUserGetDTO(user);
+        for (UserService.PagedUser pagedUser : userPage.items()) {
+            User user = pagedUser.user();
+            UserGetDTO dto = DTOMapper.INSTANCE.convertEntityToPublicUserGetDTO(user);
             dto.setToken(null);
-            if (user.getId() != null) {
-                dto.setJoinableSessionId(joinableSessionIdByUserId.get(user.getId()));
-            } else {
-                dto.setJoinableSessionId(null);
+            if (pagedUser.globalRank() != null) {
+                dto.setOverallRank(pagedUser.globalRank());
             }
-            UserStatus lobbyPresenceStatus = user.getId() == null ? null : lobbyPresenceStatusByUserId.get(user.getId());
-            dto.setStatus(normalizeVisibleStatus(user.getStatus(), lobbyPresenceStatus));
+            dto.setJoinableSessionId(pagedUser.joinableSessionId());
+            dto.setStatus(pagedUser.visibleStatus() == null
+                    ? normalizeVisibleStatus(user.getStatus(), null)
+                    : pagedUser.visibleStatus());
             userGetDTOs.add(dto);
         }
-        return userGetDTOs;
+        return new UserPageDTO(
+                userGetDTOs,
+                userPage.page(),
+                userPage.size(),
+                userPage.totalElements(),
+                userPage.totalPages(),
+                userPage.hasNext());
+    }
+
+    private void validateUserPageBounds(int page, int size, String search) {
+        if (page < 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "page must be at least 0");
+        }
+        if (size < 1 || size > MAX_USER_PAGE_SIZE) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "size must be between 1 and " + MAX_USER_PAGE_SIZE);
+        }
+        if (search.length() > MAX_USER_SEARCH_LENGTH) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "q must be at most " + MAX_USER_SEARCH_LENGTH + " characters");
+        }
+    }
+
+    private View parseUserListView(String rawView) {
+        String normalized = normalizeQueryEnum(rawView);
+        return switch (normalized) {
+            case "", "directory" -> View.DIRECTORY;
+            case "leaderboard" -> View.LEADERBOARD;
+            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported user view");
+        };
+    }
+
+    private Sort parseUserListSort(String rawSort, View view) {
+        String normalized = normalizeQueryEnum(rawSort);
+        if (normalized.isEmpty()) {
+            return view == View.LEADERBOARD ? Sort.RANK : Sort.USERNAME;
+        }
+        Sort parsed = switch (normalized) {
+            case "username" -> Sort.USERNAME;
+            case "roundsplayed" -> Sort.ROUNDS_PLAYED;
+            case "averagescore" -> Sort.AVERAGE_SCORE;
+            case "roundwinrate" -> Sort.ROUND_WIN_RATE;
+            case "status" -> Sort.STATUS;
+            case "rank" -> Sort.RANK;
+            case "gameswinrate" -> Sort.GAMES_WIN_RATE;
+            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported user sort");
+        };
+        if (parsed == Sort.RANK && view != View.LEADERBOARD) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "rank sort requires leaderboard view");
+        }
+        return parsed;
+    }
+
+    private Direction parseUserListDirection(String rawDirection) {
+        return switch (normalizeQueryEnum(rawDirection)) {
+            case "", "asc" -> Direction.ASC;
+            case "desc" -> Direction.DESC;
+            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported sort direction");
+        };
+    }
+
+    private Set<UserStatus> parseUserStatuses(List<String> rawStatuses) {
+        if (rawStatuses == null || rawStatuses.isEmpty()) {
+            return Set.of();
+        }
+        LinkedHashSet<UserStatus> statuses = new LinkedHashSet<>();
+        for (String rawStatusGroup : rawStatuses) {
+            if (rawStatusGroup == null) {
+                continue;
+            }
+            for (String rawStatus : rawStatusGroup.split(",")) {
+                String normalized = rawStatus.trim().toUpperCase(Locale.ROOT);
+                if (normalized.isEmpty()) {
+                    continue;
+                }
+                try {
+                    statuses.add(UserStatus.valueOf(normalized));
+                } catch (IllegalArgumentException exception) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported user status");
+                }
+            }
+        }
+        return Set.copyOf(statuses);
+    }
+
+    private Set<Long> parseBoundedIds(List<Long> rawIds, int maxIds, String parameterName) {
+        if (rawIds == null || rawIds.isEmpty()) {
+            return Set.of();
+        }
+        LinkedHashSet<Long> ids = new LinkedHashSet<>();
+        for (Long id : rawIds) {
+            if (id == null || id <= 0) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        parameterName + " values must be positive");
+            }
+            ids.add(id);
+        }
+        if (ids.size() > maxIds) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    parameterName + " accepts at most " + maxIds + " values");
+        }
+        return Set.copyOf(ids);
+    }
+
+    private String normalizeQueryEnum(String rawValue) {
+        return rawValue == null
+                ? ""
+                : rawValue.trim().toLowerCase(Locale.ROOT).replace("-", "").replace("_", "");
     }
 
     @PostMapping("/users")
@@ -146,7 +303,7 @@ public class UserController {
     @ResponseStatus(HttpStatus.OK)
     @ResponseBody
     public UserGetDTO getUserById(@PathVariable Long userId) {
-        User user = userService.getUserById(userId);
+        User user = userService.getUserProfileById(userId);
         UserGetDTO dto = DTOMapper.INSTANCE.convertEntityToUserGetDTO(user);
         dto.setToken(null);
         UserStatus lobbyPresenceStatus = null;
@@ -162,7 +319,19 @@ public class UserController {
 
     @PutMapping("/users/{userId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void updateUser(@PathVariable Long userId, @Valid @RequestBody UserPutDTO userPutDTO) {
+    public void updateUser(
+            @PathVariable Long userId,
+            @RequestHeader(value = "Authorization", required = false) String token,
+            @Valid @RequestBody UserPutDTO userPutDTO) {
+        User authenticatedUser = token == null || token.isBlank()
+                ? null
+                : userRepository.findByToken(token);
+        if (authenticatedUser == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");
+        }
+        if (authenticatedUser.getId() == null || !authenticatedUser.getId().equals(userId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Cannot update another user");
+        }
         userService.updateUser(userId, userPutDTO);
     }
 
@@ -311,13 +480,19 @@ public class UserController {
     }
 
     @GetMapping("/users/{id}/history")
-    public List<SessionHistoryDTO> getUserHistory(@PathVariable Long id, @RequestHeader("Authorization") String token) {
-        User user = userRepository.findByToken(token);
-        if (user == null) {
+    public List<SessionHistoryDTO> getUserHistory(
+            @PathVariable Long id,
+            @RequestHeader(value = "Authorization", required = false) String token,
+            @RequestParam(defaultValue = "200") int limit,
+            @RequestParam(defaultValue = "0") int offset) {
+        if (token == null || token.isBlank() || userRepository.findByToken(token) == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token!");
         }
 
-        List<Session> sessionHistory = historyService.getUserSessionHistory(id);
+        userRepository.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found!"));
+
+        List<Session> sessionHistory = historyService.getUserSessionHistory(id, limit, offset);
         return DTOMapper.INSTANCE.convertEntityListToSessionHistoryDTOList(sessionHistory);
     }
 }

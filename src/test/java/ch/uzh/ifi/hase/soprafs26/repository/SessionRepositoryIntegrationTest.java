@@ -5,6 +5,8 @@ import ch.uzh.ifi.hase.soprafs26.support.PostgresDataJpaTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.jpa.test.autoconfigure.TestEntityManager;
+import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -18,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @PostgresDataJpaTest
+@Import(SessionHistoryQueryRepository.class)
 public class SessionRepositoryIntegrationTest {
 
     @Autowired
@@ -25,6 +28,12 @@ public class SessionRepositoryIntegrationTest {
 
     @Autowired
     private SessionRepository sessionRepository;
+
+    @Autowired
+    private SessionHistoryQueryRepository sessionHistoryQueryRepository;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     @Test
     void saveSession_appliesDefaultValuesAndRequiredFields() {
@@ -81,5 +90,53 @@ public class SessionRepositoryIntegrationTest {
         assertEquals(round1user2score, found.getUserScoresPerRound().get(0).get(2L));
         assertEquals(round2user1score, found.getUserScoresPerRound().get(1).get(1L));
         assertEquals(round2user2score, found.getUserScoresPerRound().get(1).get(2L));
+    }
+
+    @Test
+    void findRecentHistoryForUser_filtersJsonbKeyOrdersAndUsesGinIndex() {
+        Session older = new Session();
+        older.setSessionId("HISTORY-OLDER");
+        older.setStartTime(Instant.now().minusSeconds(120));
+        older.setTotalScoreByUserId(Map.of(7L, 42));
+
+        Session newest = new Session();
+        newest.setSessionId("HISTORY-NEWEST");
+        newest.setStartTime(Instant.now());
+        newest.setTotalScoreByUserId(Map.of(7L, 12, 8L, 20));
+
+        Session unrelated = new Session();
+        unrelated.setSessionId("HISTORY-OTHER");
+        unrelated.setStartTime(Instant.now().plusSeconds(30));
+        unrelated.setTotalScoreByUserId(Map.of(8L, 1));
+
+        entityManager.persist(older);
+        entityManager.persist(newest);
+        entityManager.persist(unrelated);
+        entityManager.flush();
+        entityManager.clear();
+
+        List<Long> result =
+                sessionHistoryQueryRepository.findRecentSessionIdsForUser(7L, 200, 0);
+        assertEquals(List.of(newest.getId(), older.getId()), result);
+
+        List<Long> secondPage =
+                sessionHistoryQueryRepository.findRecentSessionIdsForUser(7L, 1, 1);
+        assertEquals(List.of(older.getId()), secondPage);
+
+        jdbcTemplate.execute("SET LOCAL enable_seqscan = off");
+        List<String> plan = jdbcTemplate.query(
+                """
+                EXPLAIN (COSTS OFF)
+                SELECT s.id
+                FROM sessions s
+                WHERE s.total_score_by_user_id ?? CAST(? AS text)
+                """,
+                (resultSet, rowNumber) -> resultSet.getString(1),
+                "7");
+
+        assertTrue(
+                plan.stream().anyMatch(line ->
+                        line.contains("idx_sessions_total_score_by_user_id_gin")),
+                () -> "Expected the history GIN index in this plan: " + String.join(" | ", plan));
     }
 }

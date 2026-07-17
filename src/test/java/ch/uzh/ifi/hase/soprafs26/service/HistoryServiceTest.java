@@ -1,11 +1,9 @@
 package ch.uzh.ifi.hase.soprafs26.service;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.time.Instant;
 
 import org.mockito.Mockito;
@@ -18,7 +16,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
 import ch.uzh.ifi.hase.soprafs26.entity.Session;
-import ch.uzh.ifi.hase.soprafs26.entity.User;
+import ch.uzh.ifi.hase.soprafs26.repository.SessionHistoryQueryRepository;
 import ch.uzh.ifi.hase.soprafs26.repository.SessionRepository;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 
@@ -31,15 +29,14 @@ public class HistoryServiceTest {
     @Mock
     private SessionRepository sessionRepository;
 
+    @Mock
+    private SessionHistoryQueryRepository sessionHistoryQueryRepository;
+
     @InjectMocks
     private HistoryService historyService;
 
     @Test
     public void requestSessionHistory_success() {
-
-        // Setup User
-        User testUser = new User();
-        testUser.setId(1L);
 
         // Setup Session
         Session testSession = new Session();
@@ -50,8 +47,10 @@ public class HistoryServiceTest {
         testSession.getTotalScoreByUserId().put(1L, 150); 
 
         // Mock repository behavior
-        Mockito.when(sessionRepository.findAll()).thenReturn(List.of(testSession));
-        Mockito.when(userRepository.findById(any())).thenReturn(Optional.of(testUser));
+        Mockito.when(sessionHistoryQueryRepository.findRecentSessionIdsForUser(1L, 200, 0))
+                .thenReturn(List.of(10L));
+        Mockito.when(sessionRepository.findAllById(List.of(10L))).thenReturn(List.of(testSession));
+        Mockito.when(userRepository.existsById(1L)).thenReturn(true);
 
         // Execute service method
         List<Session> result = historyService.getUserSessionHistory(1L);
@@ -64,12 +63,9 @@ public class HistoryServiceTest {
 
     @Test
     void getUserSessionHistory_userExists_returnsOnlyFilteredSessions() {
-        // 1. Setup: Create a mock user
-        User mockUser = new User();
-        mockUser.setId(1L);
-
         // Setup: Create a session where User 1 participated
         Session session1 = new Session();
+        session1.setId(11L);
         session1.setSessionId("session-1");
         session1.setTotalScoreByUserId(Map.of(1L, 50, 2L, 40)); 
 
@@ -79,10 +75,12 @@ public class HistoryServiceTest {
         session2.setTotalScoreByUserId(Map.of(2L, 100, 3L, 20)); 
 
         // 2. Mock Repository Behavior
-        Mockito.when(userRepository.findById(1L)).thenReturn(Optional.of(mockUser));
+        Mockito.when(userRepository.existsById(1L)).thenReturn(true);
         
-        // Mock findAll to return BOTH sessions
-        Mockito.when(sessionRepository.findAll()).thenReturn(List.of(session1, session2));
+        // PostgreSQL applies the JSONB membership filter before returning rows.
+        Mockito.when(sessionHistoryQueryRepository.findRecentSessionIdsForUser(1L, 200, 0))
+                .thenReturn(List.of(11L));
+        Mockito.when(sessionRepository.findAllById(List.of(11L))).thenReturn(List.of(session1));
 
         // 3. Action: Call the service method
         List<Session> history = historyService.getUserSessionHistory(1L);
@@ -96,7 +94,7 @@ public class HistoryServiceTest {
     @Test
     void getUserSessionHistory_userDoesNotExist_throwsNotFound() {
         // 1. Setup & Mock: Simulate a database that cannot find User 99
-        Mockito.when(userRepository.findById(99L)).thenReturn(Optional.empty());
+        Mockito.when(userRepository.existsById(99L)).thenReturn(false);
 
         // 2. Action & Assertion: Expect a 404 NOT FOUND
         ResponseStatusException exception = assertThrows(ResponseStatusException.class, () -> {
@@ -106,21 +104,20 @@ public class HistoryServiceTest {
         assertEquals(HttpStatus.NOT_FOUND, exception.getStatusCode());
         assertEquals("User not found!", exception.getReason());
         
-        // Verify the system never tried to load all sessions from the database
-        Mockito.verify(sessionRepository, Mockito.never()).findAll();
+        Mockito.verifyNoInteractions(sessionHistoryQueryRepository, sessionRepository);
     }
 
     @Test
-    void getUserSessionHistory_usesShortLivedCacheToAvoidDuplicateDbReads() {
-        User mockUser = new User();
-        mockUser.setId(5L);
-
+    void getUserSessionHistory_usesBoundedDatabaseQuery() {
         Session session = new Session();
+        session.setId(15L);
         session.setSessionId("cached-session");
         session.setTotalScoreByUserId(Map.of(5L, 10));
 
-        Mockito.when(userRepository.findById(5L)).thenReturn(Optional.of(mockUser));
-        Mockito.when(sessionRepository.findAll()).thenReturn(List.of(session));
+        Mockito.when(userRepository.existsById(5L)).thenReturn(true);
+        Mockito.when(sessionHistoryQueryRepository.findRecentSessionIdsForUser(5L, 200, 0))
+                .thenReturn(List.of(15L));
+        Mockito.when(sessionRepository.findAllById(List.of(15L))).thenReturn(List.of(session));
 
         List<Session> first = historyService.getUserSessionHistory(5L);
         List<Session> second = historyService.getUserSessionHistory(5L);
@@ -128,36 +125,69 @@ public class HistoryServiceTest {
         assertEquals(1, first.size());
         assertEquals(1, second.size());
         assertEquals("cached-session", second.get(0).getSessionId());
-        Mockito.verify(sessionRepository, Mockito.times(1)).findAll();
+        Mockito.verify(sessionHistoryQueryRepository, Mockito.times(2))
+                .findRecentSessionIdsForUser(5L, 200, 0);
+        Mockito.verify(sessionRepository, Mockito.times(2)).findAllById(List.of(15L));
     }
 
     @Test
-    void getUserSessionHistory_sortsDescendingAndSkipsMalformedSessions() {
-        User mockUser = new User();
-        mockUser.setId(6L);
-
+    void getUserSessionHistory_preservesDatabaseOrdering() {
         Session newest = new Session();
+        newest.setId(16L);
         newest.setSessionId("newest");
         newest.setStartTime(Instant.now());
         newest.setTotalScoreByUserId(Map.of(6L, 20));
 
         Session older = new Session();
+        older.setId(17L);
         older.setSessionId("older");
         older.setStartTime(Instant.now().minusSeconds(120));
         older.setTotalScoreByUserId(Map.of(6L, 30));
 
-        Session malformed = new Session();
-        malformed.setSessionId("malformed");
-        malformed.setStartTime(Instant.now().minusSeconds(60));
-        malformed.setTotalScoreByUserId(null);
-
-        Mockito.when(userRepository.findById(6L)).thenReturn(Optional.of(mockUser));
-        Mockito.when(sessionRepository.findAll()).thenReturn(java.util.Arrays.asList(malformed, older, newest, null));
+        Mockito.when(userRepository.existsById(6L)).thenReturn(true);
+        Mockito.when(sessionHistoryQueryRepository.findRecentSessionIdsForUser(6L, 200, 0))
+                .thenReturn(List.of(16L, 17L));
+        Mockito.when(sessionRepository.findAllById(List.of(16L, 17L)))
+                .thenReturn(List.of(older, newest));
 
         List<Session> history = historyService.getUserSessionHistory(6L);
 
         assertEquals(2, history.size());
         assertEquals("newest", history.get(0).getSessionId());
         assertEquals("older", history.get(1).getSessionId());
+    }
+
+    @Test
+    void getUserSessionHistory_threadsLimitAndOffset() {
+        Mockito.when(userRepository.existsById(7L)).thenReturn(true);
+        Mockito.when(sessionHistoryQueryRepository.findRecentSessionIdsForUser(7L, 25, 50))
+                .thenReturn(List.of());
+
+        assertTrue(historyService.getUserSessionHistory(7L, 25, 50).isEmpty());
+
+        Mockito.verify(sessionHistoryQueryRepository).findRecentSessionIdsForUser(7L, 25, 50);
+        Mockito.verifyNoInteractions(sessionRepository);
+    }
+
+    @Test
+    void getUserSessionHistory_rejectsInvalidBoundsBeforeQuerying() {
+        ResponseStatusException zeroLimit = assertThrows(
+                ResponseStatusException.class,
+                () -> historyService.getUserSessionHistory(7L, 0, 0));
+        ResponseStatusException excessiveLimit = assertThrows(
+                ResponseStatusException.class,
+                () -> historyService.getUserSessionHistory(7L, 201, 0));
+        ResponseStatusException negativeOffset = assertThrows(
+                ResponseStatusException.class,
+                () -> historyService.getUserSessionHistory(7L, 10, -1));
+        ResponseStatusException excessiveOffset = assertThrows(
+                ResponseStatusException.class,
+                () -> historyService.getUserSessionHistory(7L, 10, 10_001));
+
+        assertEquals(HttpStatus.BAD_REQUEST, zeroLimit.getStatusCode());
+        assertEquals(HttpStatus.BAD_REQUEST, excessiveLimit.getStatusCode());
+        assertEquals(HttpStatus.BAD_REQUEST, negativeOffset.getStatusCode());
+        assertEquals(HttpStatus.BAD_REQUEST, excessiveOffset.getStatusCode());
+        Mockito.verifyNoInteractions(sessionHistoryQueryRepository, sessionRepository);
     }
 }

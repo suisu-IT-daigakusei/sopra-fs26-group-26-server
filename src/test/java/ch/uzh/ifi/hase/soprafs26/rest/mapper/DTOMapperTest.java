@@ -39,6 +39,8 @@ public class DTOMapperTest {
 		user.setUsername("firstname@lastname");
 		user.setStatus(UserStatus.OFFLINE);
 		user.setToken("1");
+		user.setGamesPlayed(12);
+		user.setRoundsPlayed(34);
 
 		// MAP -> Create UserGetDTO
 		UserGetDTO userGetDTO = DTOMapper.INSTANCE.convertEntityToUserGetDTO(user);
@@ -49,6 +51,12 @@ public class DTOMapperTest {
 		assertEquals(user.getUsername(), userGetDTO.getUsername());
 		assertEquals(user.getStatus(), userGetDTO.getStatus());
 		assertEquals(user.getToken(), userGetDTO.getToken());
+		assertEquals(user.getGamesPlayed(), userGetDTO.getGamesPlayed());
+		assertEquals(user.getRoundsPlayed(), userGetDTO.getRoundsPlayed());
+
+		UserGetDTO publicUserGetDTO = DTOMapper.INSTANCE.convertEntityToPublicUserGetDTO(user);
+		assertEquals(user.getGamesPlayed(), publicUserGetDTO.getGamesPlayed());
+		assertEquals(user.getRoundsPlayed(), publicUserGetDTO.getRoundsPlayed());
 	}
 
 	// #109: isPublicLog handled correctly during entity - dto conversion

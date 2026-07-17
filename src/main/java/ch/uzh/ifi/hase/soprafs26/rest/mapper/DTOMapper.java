@@ -53,8 +53,52 @@ public interface DTOMapper {
     @Mapping(source = "musicVolume", target = "musicVolume")
     @Mapping(source = "soundEffectsVolume", target = "soundEffectsVolume")
     @Mapping(source = "musicBlacklist", target = "musicBlacklist")
+    @Mapping(source = "gamesPlayed", target = "gamesPlayed")
+    @Mapping(source = "roundsPlayed", target = "roundsPlayed")
     @Mapping(target = "joinableSessionId", ignore = true)
 	UserGetDTO convertEntityToUserGetDTO(User user);
+
+    /** Public list mapping that avoids the private lazy music blacklist. */
+    @BeanMapping(ignoreByDefault = true)
+    @Mapping(source = "id", target = "id")
+    @Mapping(source = "name", target = "name")
+    @Mapping(source = "username", target = "username")
+    @Mapping(source = "status", target = "status")
+    @Mapping(source = "bio", target = "bio")
+    @Mapping(source = "creationDate", target = "creationDate")
+    @Mapping(source = "gamesWon", target = "gamesWon")
+    @Mapping(source = "roundsWon", target = "roundsWon")
+    @Mapping(source = "gamesPlayed", target = "gamesPlayed")
+    @Mapping(source = "roundsPlayed", target = "roundsPlayed")
+    @Mapping(source = "averageScorePerSession", target = "averageScorePerSession")
+    @Mapping(source = "averageScorePerRound", target = "averageScorePerRound")
+    @Mapping(source = "overallRank", target = "overallRank")
+    @Mapping(source = "isPublicLog", target = "isPublicLog")
+    @Mapping(source = "profileCharacterId", target = "profileCharacterId")
+    @Mapping(source = "preferredColorPriority", target = "preferredColorPriority")
+    @Mapping(source = "primaryColorId", target = "primaryColorId")
+    @Mapping(target = "joinableSessionId", ignore = true)
+    UserGetDTO convertEntityToPublicUserGetDTO(User user);
+
+    /** Presence events intentionally avoid both lazy preference collections. */
+    @BeanMapping(ignoreByDefault = true)
+    @Mapping(source = "id", target = "id")
+    @Mapping(source = "name", target = "name")
+    @Mapping(source = "username", target = "username")
+    @Mapping(source = "status", target = "status")
+    @Mapping(source = "bio", target = "bio")
+    @Mapping(source = "creationDate", target = "creationDate")
+    @Mapping(source = "gamesWon", target = "gamesWon")
+    @Mapping(source = "roundsWon", target = "roundsWon")
+    @Mapping(source = "gamesPlayed", target = "gamesPlayed")
+    @Mapping(source = "roundsPlayed", target = "roundsPlayed")
+    @Mapping(source = "averageScorePerSession", target = "averageScorePerSession")
+    @Mapping(source = "averageScorePerRound", target = "averageScorePerRound")
+    @Mapping(source = "overallRank", target = "overallRank")
+    @Mapping(source = "profileCharacterId", target = "profileCharacterId")
+    @Mapping(source = "primaryColorId", target = "primaryColorId")
+    @Mapping(target = "joinableSessionId", ignore = true)
+    UserGetDTO convertEntityToPresenceUserGetDTO(User user);
 
     @BeanMapping(ignoreByDefault = true)
     @Mapping(source = "password", target = "password")
@@ -118,4 +162,9 @@ public interface DTOMapper {
     @BeanMapping(ignoreByDefault = true)
     @Mapping(source = "resumedFromSessionId", target = "resumedFromSessionId")
     GameStateBroadcastDTO convertEntityToGameStateBroadcastDTO(Game game);
+
+    @AfterMapping
+    default void copyGameSessionBoundary(Game game, @MappingTarget GameStateBroadcastDTO dto) {
+        dto.setSessionEnded(game.isSessionEnded());
+    }
 }

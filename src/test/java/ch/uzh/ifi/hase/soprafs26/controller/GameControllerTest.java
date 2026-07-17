@@ -1,7 +1,5 @@
 package ch.uzh.ifi.hase.soprafs26.controller;
 
-import ch.uzh.ifi.hase.soprafs26.config.GameMoveAuthorizationInterceptor;
-import ch.uzh.ifi.hase.soprafs26.config.GameMoveWebConfig;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.entity.Card;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.PeekSelectionDTO;
@@ -15,7 +13,6 @@ import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -42,10 +39,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.hamcrest.Matchers.is;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @WebMvcTest(GameController.class)
-@Import({ GameMoveWebConfig.class, GameMoveAuthorizationInterceptor.class })
 public class GameControllerTest {
 
         @Autowired
@@ -61,31 +58,28 @@ public class GameControllerTest {
         private HotEndpointRateLimiter hotEndpointRateLimiter;
 
         @Test
-        void postMoveDraw_interceptorAllows_returns204() throws Exception {
+        void postMoveDraw_callsAuthorizedService_returns204() throws Exception {
                 String gameId = "id1";
-
-                doNothing().when(gameService).verifyMoveCallerIsCurrentPlayer(anyString(), anyString());
 
                 mockMvc.perform(post("/games/{gameId}/moves/draw", gameId)
                                 .header("Authorization", "token"))
                                 .andExpect(status().isNoContent());
 
-                verify(gameService).verifyMoveCallerIsCurrentPlayer(eq(gameId), eq("token"));
                 verify(gameService).moveDrawFromDrawPile(eq(gameId), eq("token"));
         }
 
         @Test
-        void postMoveCabo_interceptorForbidden_doesNotCallMoveHandler() throws Exception {
+        void postMoveCabo_serviceForbidden_returns403() throws Exception {
                 String gameId = "id1";
 
                 doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Not your turn"))
-                                .when(gameService).verifyMoveCallerIsCurrentPlayer(anyString(), anyString());
+                                .when(gameService).moveCallCabo(anyString(), anyString());
 
                 mockMvc.perform(post("/games/{gameId}/moves/cabo", gameId)
                                 .header("Authorization", "token"))
                                 .andExpect(status().isForbidden());
 
-                verify(gameService, never()).moveCallCabo(anyString(), anyString());
+                verify(gameService).moveCallCabo(eq(gameId), eq("token"));
         }
 
         @Test
@@ -142,30 +136,35 @@ public class GameControllerTest {
                 String sessionId = "ABCD12EF";
                 String token = "valid-token";
 
-                Lobby mockLobby = mock(Lobby.class);
-                when(mockLobby.getPlayerIds()).thenReturn(List.of(1L, 2L, 3L));
-
                 Game game = new Game();
                 game.setId("game-123");
+                game.setStatus(GameStatus.INITIAL_PEEK);
+                Card secretCard = new Card();
+                secretCard.setCode("KS");
+                secretCard.setValue(13);
+                game.setDrawPile(List.of(secretCard));
+                game.setDiscardPile(List.of(secretCard));
+                game.setPlayerHands(Map.of(1L, List.of(secretCard)));
+                game.setDrawnCard(secretCard);
 
-                when(lobbyService.verifyLobbyCanStart(anyString(), anyString())).thenReturn(mockLobby);
-                when(gameService.startGame(anyList(), any(Lobby.class))).thenReturn(game);
-                doNothing().when(lobbyService).markLobbyAsPlaying(anyString());
+                when(lobbyService.startGameAtomically(anyString(), anyString())).thenReturn(game);
 
                 when(gameService.getGameById(anyString())).thenReturn(game);
-                doNothing().when(gameService).verifyMoveCallerIsCurrentPlayer(anyString(), anyString());
 
                 mockMvc.perform(post("/lobbies/{sessionId}/start", sessionId)
                                 .header("Authorization", token)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{}"))
                                 .andExpect(status().isOk())
-                                .andExpect(jsonPath("$.id", is("game-123")));
+                                .andExpect(jsonPath("$.id", is("game-123")))
+                                .andExpect(jsonPath("$.status", is("INITIAL_PEEK")))
+                                .andExpect(jsonPath("$.drawPile").doesNotExist())
+                                .andExpect(jsonPath("$.discardPile").doesNotExist())
+                                .andExpect(jsonPath("$.playerHands").doesNotExist())
+                                .andExpect(jsonPath("$.drawnCard").doesNotExist());
 
-                var order = inOrder(lobbyService, gameService);
-                order.verify(lobbyService).verifyLobbyCanStart(eq(token), eq(sessionId));
-                order.verify(gameService).startGame(anyList(), any(Lobby.class));
-                order.verify(lobbyService).markLobbyAsPlaying(eq(sessionId));
+                verify(lobbyService).startGameAtomically(eq(token), eq(sessionId));
+                verify(gameService, never()).startGame(anyList(), any(Lobby.class));
         }
 
         @Test
@@ -653,21 +652,11 @@ public class GameControllerTest {
     }
 
     @Test
-    void moveCardToDiscardPile_validRequest_returnsUpdatedGame() throws Exception {
-        // 1. Setup
-        Game mockGame = new Game();
-        mockGame.setId("game-123");
-        // We only need to mock getGameById, because the other two void methods will succeed by doing nothing!
-        Mockito.when(gameService.getGameById("game-123")).thenReturn(mockGame);
-
-        // 2. Action & 3. Assertion
+    void moveCardToDiscardPile_validRequest_returns204() throws Exception {
         mockMvc.perform(post("/games/game-123/drawn-card/discard")
                 .header("Authorization", "valid-token"))
-               .andExpect(status().isOk())
-               .andExpect(jsonPath("$.id", is("game-123")));
+               .andExpect(status().isNoContent());
 
-        // Verify that the two void methods were actually called in the correct order
-        Mockito.verify(gameService, Mockito.times(1)).verifyMoveCallerIsCurrentPlayer("game-123", "valid-token");
         Mockito.verify(gameService, Mockito.times(1)).moveCardToDiscardPile("game-123", "valid-token");
     }
 
@@ -675,23 +664,21 @@ public class GameControllerTest {
     void moveCardToDiscardPile_notCurrentPlayer_throwsForbidden() throws Exception {
         // 1. Setup: Use doThrow() for the void method to simulate a security block
         Mockito.doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Not your turn"))
-               .when(gameService).verifyMoveCallerIsCurrentPlayer("game-123", "bad-token");
+               .when(gameService).moveCardToDiscardPile("game-123", "bad-token");
 
         // 2. Action & 3. Assertion
         mockMvc.perform(post("/games/game-123/drawn-card/discard")
                 .header("Authorization", "bad-token"))
                .andExpect(status().isForbidden());
 
-        // Verify that because the first check failed, the actual move logic was NEVER executed
-        Mockito.verify(gameService, Mockito.never()).moveCardToDiscardPile(Mockito.anyString(), Mockito.anyString());
+        Mockito.verify(gameService).moveCardToDiscardPile("game-123", "bad-token");
         Mockito.verify(gameService, Mockito.never()).getGameById(Mockito.anyString());
     }
 
     @Test
     void moveCardToDiscardPile_gameNotFound_throwsNotFound() throws Exception {
-        // 1. Setup: Simulate the game missing when it tries to return it at the very end
-        Mockito.when(gameService.getGameById("invalid-game"))
-               .thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Game not found"));
+        Mockito.doThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Game not found"))
+               .when(gameService).moveCardToDiscardPile("invalid-game", "valid-token");
 
         // 2. Action & 3. Assertion
         mockMvc.perform(post("/games/invalid-game/drawn-card/discard")
@@ -812,27 +799,12 @@ public class GameControllerTest {
     }
 
     @Test
-    void resumeGame_sessionNotFound_throwsNotFound() throws Exception {
-        // 1. Setup: The service cannot find the session ID in the database
-        Mockito.when(gameService.resumeGame(99L))
-               .thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found"));
+    void resumeGame_routeIsDisabled() throws Exception {
+        mockMvc.perform(post("/games/resume/77")
+                .header("Authorization", "resume-token"))
+               .andExpect(status().isNotFound());
 
-        // 2. Action & 3. Assertion
-        mockMvc.perform(post("/games/resume/99")
-                .contentType(MediaType.APPLICATION_JSON))
-               .andExpect(status().isNotFound()); // Expecting 404 NOT FOUND
-    }
-
-    @Test
-    void resumeGame_sessionInvalidOrEnded_throwsBadRequest() throws Exception {
-        // 1. Setup: The session exists, but no players are in it or it already ended
-        Mockito.when(gameService.resumeGame(99L))
-               .thenThrow(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Session already finished"));
-
-        // 2. Action & 3. Assertion
-        mockMvc.perform(post("/games/resume/99")
-                .contentType(MediaType.APPLICATION_JSON))
-               .andExpect(status().isBadRequest()); // Expecting 400 BAD REQUEST
+        Mockito.verifyNoInteractions(gameService);
     }
 
     @Test
@@ -849,7 +821,7 @@ public class GameControllerTest {
         Card handCard = new Card();
         handCard.setCode("5C");
         handCard.setValue(5);
-        handCard.setVisibility(false);
+        handCard.setVisibility(true);
         Mockito.when(gameService.getMyHand("game-123", "valid-token")).thenReturn(List.of(handCard));
 
         mockMvc.perform(get("/games/game-123/my-hand")
@@ -869,19 +841,6 @@ public class GameControllerTest {
                .andExpect(status().isOk())
                .andExpect(jsonPath("$.turnTimeoutMs", is(30000)))
                .andExpect(jsonPath("$.rematchDecisionSeconds", is(60)));
-    }
-
-    @Test
-    void resumeGame_validSession_returnsCreated() throws Exception {
-        Game resumed = new Game();
-        resumed.setId("game-777");
-        Mockito.when(gameService.resumeGame(77L)).thenReturn(resumed);
-
-        mockMvc.perform(post("/games/resume/77")
-                .contentType(MediaType.APPLICATION_JSON))
-               .andExpect(status().isCreated());
-
-        Mockito.verify(gameService, Mockito.times(1)).resumeGame(77L);
     }
 
 }

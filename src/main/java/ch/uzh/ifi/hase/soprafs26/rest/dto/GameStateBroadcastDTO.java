@@ -19,6 +19,7 @@ public class GameStateBroadcastDTO {
     private CardViewDTO drawnCard;
     private boolean caboCalled;
     private boolean caboForcedByTimeout;
+    private boolean sessionEnded;
     private long turnSeconds;
     private long initialPeekSeconds;
     private long abilityRevealSeconds;
@@ -100,6 +101,14 @@ public class GameStateBroadcastDTO {
 
     public void setCaboForcedByTimeout(boolean caboForcedByTimeout) {
         this.caboForcedByTimeout = caboForcedByTimeout;
+    }
+
+    public boolean isSessionEnded() {
+        return sessionEnded;
+    }
+
+    public void setSessionEnded(boolean sessionEnded) {
+        this.sessionEnded = sessionEnded;
     }
 
     public long getTurnSeconds() {

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run safe Cabo Docker disk maintenance weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:15:00 UTC
+RandomizedDelaySec=30m
+Persistent=true
+Unit=cabo-docker-maintenance.service
+
+[Install]
+WantedBy=timers.target

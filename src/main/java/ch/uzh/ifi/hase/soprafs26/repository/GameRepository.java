@@ -23,6 +23,8 @@ public interface GameRepository extends JpaRepository<Game, String> {
 
     List<Game> findTop200ByStatusAndRoundEndedAtBeforeOrderByRoundEndedAtAsc(GameStatus status, Instant cutoff);
 
+    List<Game> findTop200ByStatusNotOrderByIdAsc(GameStatus status);
+
     default List<Game> findGamesByPlayerId(Long playerId) {
         if (playerId == null) {
             return List.of();

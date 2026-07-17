@@ -1044,7 +1044,9 @@ public class LobbyService {
             }
 
             String sessionId = lobby.getSessionId();
-            if (sessionId != null && !sessionId.isBlank()) {
+            if (Boolean.TRUE.equals(lobby.getIsPublic())
+                    && sessionId != null
+                    && !sessionId.isBlank()) {
                 joinableSessionIdByUserId.put(userId, sessionId);
             }
 
@@ -1190,7 +1192,7 @@ public class LobbyService {
     }
 
     public void addPlayerToLobby(Long lobbyId, Long hostUserId, Long guestUserId) {
-        Lobby lobby = lobbyRepository.findById(lobbyId)
+        Lobby lobby = lobbyRepository.findByIdForUpdate(lobbyId)
                 .orElse(null);
         if (lobby == null || !hostUserId.equals(lobby.getSessionHostUserId())) {
             return;
@@ -1378,10 +1380,7 @@ public class LobbyService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing ready state");
         }
         User user = getUserByToken(token);
-        Lobby lobby = lobbyRepository.findBySessionId(sessionId);
-        if (lobby == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session could not be found");
-        }
+        Lobby lobby = requireLockedLobby(sessionId);
         if (!"WAITING".equals(lobby.getStatus())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Lobby is not in waiting state");
         }
@@ -1422,10 +1421,7 @@ public class LobbyService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No settings to update");
         }
         User user = getUserByToken(token);
-        Lobby lobby = lobbyRepository.findBySessionId(sessionId);
-        if (lobby == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session could not be found");
-        }
+        Lobby lobby = requireLockedLobby(sessionId);
         if (!user.getId().equals(lobby.getSessionHostUserId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only the session host can update lobby settings");
         }
@@ -1500,11 +1496,7 @@ public class LobbyService {
     // POST /lobbies/{sessionId}/players — join a lobby
     public Lobby joinLobby(String sessionId, String token) {
         User user = getUserByToken(token);
-        Lobby lobby = lobbyRepository.findBySessionId(sessionId);
-
-        if (lobby == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session could not be found");
-        }
+        Lobby lobby = requireLockedLobby(sessionId);
         if (!"WAITING".equals(lobby.getStatus())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Lobby is not in waiting state");
         }
@@ -1538,10 +1530,7 @@ public class LobbyService {
 
     public Lobby joinLobbyAsSpectator(String sessionId, String token) {
         User user = getUserByToken(token);
-        Lobby lobby = lobbyRepository.findBySessionId(sessionId);
-        if (lobby == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session could not be found");
-        }
+        Lobby lobby = requireLockedLobby(sessionId);
         if (!"WAITING".equals(lobby.getStatus()) && !"PLAYING".equals(lobby.getStatus())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Lobby is not joinable as spectator");
         }
@@ -1578,6 +1567,31 @@ public class LobbyService {
         if (lobby == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session could not be found");
         }
+        validateLobbyCanStart(requester, lobby);
+        return lobby;
+    }
+
+    /**
+     * Starts exactly one game from a stable lobby snapshot. The pessimistic row
+     * lock and this service's transaction cover validation, game/session creation,
+     * and the lobby/user status transition. A concurrent retry waits, observes
+     * PLAYING, and fails with 409 instead of creating a duplicate game.
+     */
+    public Game startGameAtomically(String token, String sessionId) {
+        User requester = getUserByToken(token);
+        Lobby lobby = lobbyRepository.findBySessionIdForUpdate(sessionId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Session could not be found"));
+        validateLobbyCanStart(requester, lobby);
+
+        List<Long> playerIds = List.copyOf(lobby.getPlayerIds());
+        Game startedGame = gameService.startGame(playerIds, lobby);
+        markLobbyAsPlaying(lobby);
+        return startedGame;
+    }
+
+    private void validateLobbyCanStart(User requester, Lobby lobby) {
         if (!requester.getId().equals(lobby.getSessionHostUserId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only the session host can start the game");
         }
@@ -1616,16 +1630,16 @@ public class LobbyService {
             }
         }
 
-        return lobby;
     }
 
     // set players as PLAYING and spectators as SPECTATING
     public void markLobbyAsPlaying(String sessionId) {
-        Lobby lobby = lobbyRepository.findBySessionId(sessionId);
-        if (lobby == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session could not be found");
-        }
+        Lobby lobby = requireLockedLobby(sessionId);
 
+        markLobbyAsPlaying(lobby);
+    }
+
+    private void markLobbyAsPlaying(Lobby lobby) {
         normalizeLobbyPlayerStateInPlace(lobby);
         lobby.setStatus("PLAYING");
         lobbyRepository.save(lobby);
@@ -1636,6 +1650,14 @@ public class LobbyService {
         }
         lobbyEventPublisher.broadcastLobbyUpdate(lobby.getId(), lobby);
         onlineUsersEventPublisher.broadcastOnlineUsers();
+    }
+
+    private Lobby requireLockedLobby(String sessionId) {
+        return lobbyRepository.findBySessionIdForUpdate(sessionId)
+                .map(this::initializeLobbyMembershipCollections)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Session could not be found"));
     }
 
     /**
@@ -2154,7 +2176,7 @@ public class LobbyService {
     @Transactional
     public Lobby removePlayerFromLobby(String sessionId, String token, Long targetUserId) {
         User requester = getUserByToken(token);
-        Lobby lobby = getLobbyBySessionId(sessionId);
+        Lobby lobby = requireLockedLobby(sessionId);
 
         // only the player themselves or the host can remove a player
         boolean isSelf = requester.getId().equals(targetUserId);
@@ -2270,11 +2292,12 @@ public class LobbyService {
     }
 
     public void removePlayerFromDisconnect(String sessionId, Long userId) {
-        Lobby lobby = lobbyRepository.findBySessionId(sessionId);
-        if (lobby == null) {
+        Optional<Lobby> lockedLobby = lobbyRepository.findBySessionIdForUpdate(sessionId);
+        if (lockedLobby.isEmpty()) {
             clearTimedOutPlayingFlag(userId);
             return;
         }
+        Lobby lobby = initializeLobbyMembershipCollections(lockedLobby.get());
         // only players are disconnected, spectators are removed immediately
         if ("PLAYING".equals(lobby.getStatus()) && lobby.getPlayerIds().contains(userId)) {
             timedOutInPlayingPlayerIds.add(userId);
@@ -2304,7 +2327,7 @@ public class LobbyService {
     @Transactional
     public Lobby removeSpectatorFromLobby(String sessionId, String token, Long targetUserId) {
         User requester = getUserByToken(token);
-        Lobby lobby = getLobbyBySessionId(sessionId);
+        Lobby lobby = requireLockedLobby(sessionId);
 
         boolean isSelf = requester.getId().equals(targetUserId);
         boolean isHost = requester.getId().equals(lobby.getSessionHostUserId());
@@ -2333,4 +2356,3 @@ public class LobbyService {
         return lobby;
     }
 }
-

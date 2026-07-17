@@ -4,11 +4,15 @@ import ch.uzh.ifi.hase.soprafs26.constant.UserStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.Session;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.UserListQuery;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendOnlineSummaryDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendRequestIncomingDTO;
 import ch.uzh.ifi.hase.soprafs26.service.HistoryService;
+import ch.uzh.ifi.hase.soprafs26.service.HotEndpointRateLimiter;
 import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
 import ch.uzh.ifi.hase.soprafs26.service.UserService;
+import ch.uzh.ifi.hase.soprafs26.service.UserService.PagedUser;
+import ch.uzh.ifi.hase.soprafs26.service.UserService.PagedUsers;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -20,6 +24,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 // These static imports are critical for the mockMvc.perform() calls
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -29,6 +34,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 // Add these to fix the Mockito errors!
 import static org.mockito.Mockito.verify;
@@ -39,7 +45,6 @@ import static org.mockito.BDDMockito.given;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 
-import java.util.Collections;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.UserPostDTO;
@@ -59,6 +64,7 @@ public class UserControllerTest {
     private HistoryService historyService;
     private LobbyService lobbyService;
     private UserRepository userRepository;
+    private HotEndpointRateLimiter hotEndpointRateLimiter;
 
     @BeforeEach
     void setup() {
@@ -67,13 +73,15 @@ public class UserControllerTest {
         historyService = Mockito.mock(HistoryService.class);
         lobbyService = Mockito.mock(LobbyService.class);
         userRepository = Mockito.mock(UserRepository.class);
+        hotEndpointRateLimiter = Mockito.mock(HotEndpointRateLimiter.class);
 
         // 2. Pass them all into the constructor in the EXACT order defined in UserController.java
         UserController userController = new UserController(
                 userService, 
                 historyService, 
                 lobbyService, 
-                userRepository
+                userRepository,
+                hotEndpointRateLimiter
         );
 
         // 3. Build the standalone setup
@@ -84,26 +92,126 @@ public class UserControllerTest {
 	public void givenUsers_whenGetUsers_thenReturnJsonArray() throws Exception {
 		// given
 		User user = new User();
+		user.setId(1L);
 		user.setName("Firstname Lastname");
 		user.setUsername("firstname@lastname");
 		user.setStatus(UserStatus.OFFLINE);
+		user.setGamesPlayed(7);
+		user.setRoundsPlayed(19);
 
-		List<User> allUsers = Collections.singletonList(user);
-
-		// this mocks the UserService -> we define above what the userService should
-		// return when getUsers() is called
-		given(userService.getUsers()).willReturn(allUsers);
+		given(userService.getUsersPage(Mockito.any())).willReturn(
+				new PagedUsers(
+						List.of(new PagedUser(user, null, UserStatus.PLAYING, "LIVE-SESSION")),
+						0,
+						20,
+						1,
+						1,
+						false));
 
 		// when
 		MockHttpServletRequestBuilder getRequest = get("/users").contentType(MediaType.APPLICATION_JSON);
 
 		// then
 		mockMvc.perform(getRequest).andExpect(status().isOk())
-				.andExpect(jsonPath("$", hasSize(1)))
-				.andExpect(jsonPath("$[0].name", is(user.getName())))
-				.andExpect(jsonPath("$[0].username", is(user.getUsername())))
-				.andExpect(jsonPath("$[0].status", is(user.getStatus().toString())));
+				.andExpect(jsonPath("$.items", hasSize(1)))
+				.andExpect(jsonPath("$.items[0].name", is(user.getName())))
+				.andExpect(jsonPath("$.items[0].username", is(user.getUsername())))
+				.andExpect(jsonPath("$.items[0].status", is(UserStatus.PLAYING.toString())))
+				.andExpect(jsonPath("$.items[0].joinableSessionId", is("LIVE-SESSION")))
+				.andExpect(jsonPath("$.items[0].gamesPlayed", is(7)))
+				.andExpect(jsonPath("$.items[0].roundsPlayed", is(19)))
+				.andExpect(jsonPath("$.page", is(0)))
+				.andExpect(jsonPath("$.size", is(20)))
+				.andExpect(jsonPath("$.totalElements", is(1)))
+				.andExpect(jsonPath("$.totalPages", is(1)))
+				.andExpect(jsonPath("$.hasNext", is(false)));
+
+		org.mockito.ArgumentCaptor<UserListQuery> queryCaptor =
+				org.mockito.ArgumentCaptor.forClass(UserListQuery.class);
+		verify(userService).getUsersPage(queryCaptor.capture());
+		assertEquals(0, queryCaptor.getValue().page());
+		assertEquals(20, queryCaptor.getValue().size());
+		assertEquals(
+				ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.View.DIRECTORY,
+				queryCaptor.getValue().view());
+		Mockito.verify(lobbyService, Mockito.never())
+				.resolveJoinableSessionsAndPresenceForUsers(Mockito.anyList());
 	}
+
+    @Test
+    void getUsers_rejectsUnboundedOrUnsupportedParameters() throws Exception {
+        mockMvc.perform(get("/users").param("page", "-1"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/users").param("size", "101"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/users").param("q", "x".repeat(65)))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/users").param("view", "directory").param("sort", "rank"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/users").param("status", "NOT_A_STATUS"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/users").param("excludeId", "0"))
+                .andExpect(status().isBadRequest());
+
+        Mockito.verify(userService, Mockito.never()).getUsersPage(Mockito.any());
+    }
+
+    @Test
+    void getUsers_friendsOnlyRequiresTokenAndPassesViewerToQuery() throws Exception {
+        mockMvc.perform(get("/users").param("friendsOnly", "true"))
+                .andExpect(status().isUnauthorized());
+
+        User viewer = new User();
+        viewer.setId(7L);
+        Mockito.when(userRepository.findByToken("viewer-token")).thenReturn(viewer);
+        Mockito.when(userService.getUsersPage(Mockito.any()))
+                .thenReturn(new PagedUsers(List.of(), 0, 20, 0, 0, false));
+
+        mockMvc.perform(get("/users")
+                        .param("view", "leaderboard")
+                        .param("friendsOnly", "true")
+                        .header("Authorization", "viewer-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items", hasSize(0)));
+
+        org.mockito.ArgumentCaptor<UserListQuery> queryCaptor =
+                org.mockito.ArgumentCaptor.forClass(UserListQuery.class);
+        verify(userService).getUsersPage(queryCaptor.capture());
+        assertEquals(7L, queryCaptor.getValue().viewerId());
+        assertEquals(true, queryCaptor.getValue().friendsOnly());
+    }
+
+    @Test
+    void getUsers_friendsOnlyRateLimitsByIpBeforeRotatingTokenLookups() throws Exception {
+        MockHttpServletRequestBuilder firstRequest = get("/users")
+                .param("friendsOnly", "true")
+                .header("Authorization", "fake-token-a")
+                .header("X-Forwarded-For", "198.51.100.23")
+                .with(request -> {
+                    request.setRemoteAddr("203.0.113.9");
+                    return request;
+                });
+        MockHttpServletRequestBuilder secondRequest = get("/users")
+                .param("friendsOnly", "true")
+                .header("Authorization", "fake-token-b")
+                .header("X-Forwarded-For", "198.51.100.23")
+                .with(request -> {
+                    request.setRemoteAddr("203.0.113.9");
+                    return request;
+                });
+
+        mockMvc.perform(firstRequest).andExpect(status().isUnauthorized());
+        mockMvc.perform(secondRequest).andExpect(status().isUnauthorized());
+
+        org.mockito.InOrder callOrder = Mockito.inOrder(hotEndpointRateLimiter, userRepository);
+        callOrder.verify(hotEndpointRateLimiter).enforceHotReadLimit(
+                "users-list-directory", null, "198.51.100.23", "203.0.113.9");
+        callOrder.verify(userRepository).findByToken("fake-token-a");
+        callOrder.verify(hotEndpointRateLimiter).enforceHotReadLimit(
+                "users-list-directory", null, "198.51.100.23", "203.0.113.9");
+        callOrder.verify(userRepository).findByToken("fake-token-b");
+        Mockito.verifyNoInteractions(userService);
+    }
 
 	@Test
 	public void createUser_validInput_userCreated() throws Exception {
@@ -290,11 +398,12 @@ public class UserControllerTest {
     }
 
     @Test
-    public void getUserHistory_validTokenAndId_returnsHistory() throws Exception {
+    public void getUserHistory_ownerCanViewPrivateHistory_returnsHistory() throws Exception {
         // 1. Arrange
         User mockUser = new User();
         mockUser.setId(1L);
         mockUser.setToken("valid-token");
+        mockUser.setIsPublicLog(false);
 
         Session mockSession = new Session();
         mockSession.setId(10L); // Internal ID is now a Long
@@ -302,32 +411,79 @@ public class UserControllerTest {
         // Add any other necessary fields your DTO mapping requires
         
         Mockito.when(userRepository.findByToken("valid-token")).thenReturn(mockUser);
+        Mockito.when(userRepository.findById(1L)).thenReturn(Optional.of(mockUser));
         
         // Updated service method call
-        Mockito.when(historyService.getUserSessionHistory(1L)).thenReturn(List.of(mockSession));
+        Mockito.when(historyService.getUserSessionHistory(1L, 25, 50)).thenReturn(List.of(mockSession));
 
         // 2. Act & 3. Assert
         mockMvc.perform(MockMvcRequestBuilders.get("/users/1/history")
-                .header("Authorization", "valid-token")
-                .contentType(MediaType.APPLICATION_JSON))
+                        .header("Authorization", "valid-token")
+                        .param("limit", "25")
+                        .param("offset", "50")
+                        .contentType(MediaType.APPLICATION_JSON))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(1)))
                 .andExpect(jsonPath("$[0].id", is(10))) // Asserting the Long ID
                 .andExpect(jsonPath("$[0].sessionId", is("session-123"))); // Asserting the String sessionId
     }
 
+    @Test
+    void getUserHistory_publicTargetAllowsAuthenticatedStranger() throws Exception {
+        User requester = new User();
+        requester.setId(1L);
+
+        User target = new User();
+        target.setId(2L);
+        target.setIsPublicLog(true);
+
+        Mockito.when(userRepository.findByToken("valid-token")).thenReturn(requester);
+        Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(target));
+        Mockito.when(historyService.getUserSessionHistory(2L, 200, 0)).thenReturn(List.of());
+
+        mockMvc.perform(get("/users/2/history")
+                        .header("Authorization", "valid-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(0)));
+
+        Mockito.verify(historyService).getUserSessionHistory(2L, 200, 0);
+    }
+
+    @Test
+    void getUserHistory_privateFlagDoesNotHideResultHistoryFromAuthenticatedStranger() throws Exception {
+        User requester = new User();
+        requester.setId(1L);
+
+        User target = new User();
+        target.setId(2L);
+        target.setIsPublicLog(false);
+
+        Mockito.when(userRepository.findByToken("valid-token")).thenReturn(requester);
+        Mockito.when(userRepository.findById(2L)).thenReturn(Optional.of(target));
+        Mockito.when(historyService.getUserSessionHistory(2L, 200, 0)).thenReturn(List.of());
+
+        mockMvc.perform(get("/users/2/history")
+                        .header("Authorization", "valid-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(0)));
+
+        Mockito.verify(historyService).getUserSessionHistory(2L, 200, 0);
+    }
+
 	@Test
     void getUserHistory_userDoesNotExist_returns404NotFound() throws Exception {
-
-		Mockito.when(userRepository.findByToken("testToken")).thenReturn(new User());
-		
-        Mockito.when(historyService.getUserSessionHistory(99L))
-               .thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found!"));
+        User requester = new User();
+        requester.setId(1L);
+        Mockito.when(userRepository.findByToken("testToken")).thenReturn(requester);
+        Mockito.when(userRepository.findById(99L)).thenReturn(Optional.empty());
 
         mockMvc.perform(get("/users/99/history")
                 .header("Authorization", "testToken")
                 .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isNotFound()); 
+                .andExpect(status().isNotFound());
+
+        Mockito.verify(historyService, Mockito.never())
+                .getUserSessionHistory(Mockito.anyLong(), Mockito.anyInt(), Mockito.anyInt());
     }
 
     @Test
@@ -341,7 +497,7 @@ public class UserControllerTest {
         // If your User entity requires a status to avoid NullPointerExceptions in normalizeVisibleStatus:
         // mockUser.setStatus(UserStatus.ONLINE); 
 
-        Mockito.when(userService.getUserById(1L)).thenReturn(mockUser);
+        Mockito.when(userService.getUserProfileById(1L)).thenReturn(mockUser);
         Mockito.when(lobbyService.resolveJoinableSessionIdForUser(1L)).thenReturn("session-123");
         
         // Assuming resolveLobbyPresenceStatusForUser returns an enum value
@@ -366,7 +522,7 @@ public class UserControllerTest {
         mockUser.setUsername("ghostUser");
 
         // The controller gets called with "2", but the returned user has no ID
-        Mockito.when(userService.getUserById(2L)).thenReturn(mockUser);
+        Mockito.when(userService.getUserProfileById(2L)).thenReturn(mockUser);
 
         // 2. Action & 3. Assertion
         mockMvc.perform(get("/users/2"))
@@ -381,7 +537,7 @@ public class UserControllerTest {
     @Test
     void getUserById_userNotFound_throwsNotFound() throws Exception {
         // 1. Setup: The user service cannot find the user
-        Mockito.when(userService.getUserById(99L))
+        Mockito.when(userService.getUserProfileById(99L))
                .thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
 
         // 2. Action & 3. Assertion
@@ -400,8 +556,13 @@ public class UserControllerTest {
                 }
                 """;
 
+        User authenticatedUser = new User();
+        authenticatedUser.setId(1L);
+        Mockito.when(userRepository.findByToken("owner-token")).thenReturn(authenticatedUser);
+
         // 2. Action & 3. Assertion
         mockMvc.perform(put("/users/1")
+                .header("Authorization", "owner-token")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(jsonBody))
                .andExpect(status().isNoContent()); // 204 NO CONTENT
@@ -417,6 +578,7 @@ public class UserControllerTest {
 
         // 2. Action & 3. Assertion
         mockMvc.perform(put("/users/1")
+                .header("Authorization", "owner-token")
                 .contentType(MediaType.APPLICATION_JSON)) // Notice: No .content()!
                .andExpect(status().isBadRequest()); // 400 BAD REQUEST
 
@@ -437,11 +599,56 @@ public class UserControllerTest {
                 }
                 """;
 
+        User authenticatedUser = new User();
+        authenticatedUser.setId(99L);
+        Mockito.when(userRepository.findByToken("owner-token")).thenReturn(authenticatedUser);
+
         // 2. Action & 3. Assertion
         mockMvc.perform(put("/users/99")
+                .header("Authorization", "owner-token")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(jsonBody))
                .andExpect(status().isNotFound()); // 404 NOT FOUND
+    }
+
+    @Test
+    void updateUser_missingOrInvalidToken_returnsUnauthorized() throws Exception {
+        String jsonBody = """
+                { "bio": "should not be written" }
+                """;
+
+        mockMvc.perform(put("/users/1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonBody))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(put("/users/1")
+                        .header("Authorization", "bad-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonBody))
+                .andExpect(status().isUnauthorized());
+
+        Mockito.verify(userService, Mockito.never())
+                .updateUser(Mockito.anyLong(), Mockito.any(ch.uzh.ifi.hase.soprafs26.rest.dto.UserPutDTO.class));
+    }
+
+    @Test
+    void updateUser_authenticatedDifferentUser_returnsForbidden() throws Exception {
+        User authenticatedUser = new User();
+        authenticatedUser.setId(2L);
+        Mockito.when(userRepository.findByToken("other-user-token")).thenReturn(authenticatedUser);
+        String jsonBody = """
+                { "bio": "should not be written" }
+                """;
+
+        mockMvc.perform(put("/users/1")
+                        .header("Authorization", "other-user-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonBody))
+                .andExpect(status().isForbidden());
+
+        Mockito.verify(userService, Mockito.never())
+                .updateUser(Mockito.anyLong(), Mockito.any(ch.uzh.ifi.hase.soprafs26.rest.dto.UserPutDTO.class));
     }
 
     @Test
@@ -670,7 +877,17 @@ public class UserControllerTest {
                .andExpect(status().isUnauthorized()); // 401 UNAUTHORIZED
 
         // Verify that the history service is entirely protected and never called
-        Mockito.verify(historyService, Mockito.never()).getUserSessionHistory(Mockito.anyLong());
+        Mockito.verify(historyService, Mockito.never())
+                .getUserSessionHistory(Mockito.anyLong(), Mockito.anyInt(), Mockito.anyInt());
+    }
+
+    @Test
+    void getUserHistory_missingToken_throwsUnauthorized() throws Exception {
+        mockMvc.perform(get("/users/1/history"))
+               .andExpect(status().isUnauthorized());
+
+        Mockito.verifyNoInteractions(historyService);
+        Mockito.verify(userRepository, Mockito.never()).findByToken(Mockito.anyString());
     }
 
 

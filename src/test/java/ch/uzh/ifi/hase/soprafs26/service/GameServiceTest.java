@@ -10,7 +10,6 @@ import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
 import ch.uzh.ifi.hase.soprafs26.repository.GameRepository;
 import ch.uzh.ifi.hase.soprafs26.repository.SessionRepository;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
-import ch.uzh.ifi.hase.soprafs26.rest.dto.CardDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CardViewDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.GameStateBroadcastDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.GameSyncStateDTO;
@@ -28,9 +27,13 @@ import org.mockito.MockitoAnnotations;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -46,6 +49,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -125,6 +129,137 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         // mock timer without waiting for it
         Mockito.when(scheduler.schedule(Mockito.any(Runnable.class), Mockito.anyLong(), Mockito.any(TimeUnit.class)))
                 .thenAnswer(invocation -> Mockito.mock(ScheduledFuture.class));
+    }
+
+    @Test
+    void saveGameAndBroadcast_defersPublicationUntilTransactionCommit() throws Exception {
+        Game game = new Game();
+        game.setId("commit-order-game");
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        Mockito.when(gameRepository.save(game)).thenReturn(game);
+
+        Method method = GameService.class.getDeclaredMethod("saveGameAndBroadcast", Game.class);
+        method.setAccessible(true);
+
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            method.invoke(gameService, game);
+
+            Mockito.verify(gameEventPublisher, Mockito.never()).publishFilteredState(Mockito.any(Game.class));
+            List<TransactionSynchronization> synchronizations =
+                    TransactionSynchronizationManager.getSynchronizations();
+            assertEquals(1, synchronizations.size());
+
+            Field syncCacheField = GameService.class.getDeclaredField("syncStateCacheByViewerAndGame");
+            syncCacheField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> syncCache = (Map<String, Object>) syncCacheField.get(gameService);
+            syncCache.put("commit-order-game|concurrent-viewer", new Object());
+
+            synchronizations.forEach(TransactionSynchronization::afterCommit);
+            Mockito.verify(gameEventPublisher).publishFilteredState(game);
+            assertFalse(syncCache.containsKey("commit-order-game|concurrent-viewer"),
+                    "The after-commit callback must remove a stale cache refill");
+        } finally {
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void runAfterCommitOrNow_logsPostCommitFailureWithoutPropagatingIt() throws Exception {
+        Method method = GameService.class.getDeclaredMethod("runAfterCommitOrNow", Runnable.class);
+        method.setAccessible(true);
+
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            Runnable failingAction = () -> {
+                throw new IllegalStateException("scheduler unavailable");
+            };
+            method.invoke(gameService, failingAction);
+
+            TransactionSynchronization synchronization =
+                    TransactionSynchronizationManager.getSynchronizations().get(0);
+            assertDoesNotThrow(synchronization::afterCommit);
+        } finally {
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void recoverPersistedGameTimers_mapsEveryActivePhaseAndDoesNotScheduleDuplicates() {
+        Game intro = persistedGame("recover-intro", GameStatus.INTRO);
+        Game initialPeek = persistedGame("recover-initial", GameStatus.INITIAL_PEEK);
+        initialPeek.setInitialPeekSeconds(11L);
+        Game roundActive = persistedGame("recover-round", GameStatus.ROUND_ACTIVE);
+        roundActive.setCurrentPlayerId(1L);
+        roundActive.setTurnSeconds(12L);
+        Game peekSelection = persistedGame("recover-peek-selection", GameStatus.ABILITY_PEEK_SELF);
+        peekSelection.setTurnSeconds(13L);
+        Game peekReveal = persistedGame("recover-peek-reveal", GameStatus.ABILITY_PEEK_OPPONENT);
+        peekReveal.setSpecialPeekUsed(true);
+        peekReveal.setAbilityRevealSeconds(14L);
+        Game swap = persistedGame("recover-swap", GameStatus.ABILITY_SWAP);
+        swap.setAbilitySwapSeconds(15L);
+        Game reveal = persistedGame("recover-reveal", GameStatus.CABO_REVEAL);
+        reveal.setCaboRevealSeconds(16L);
+        Game rematch = persistedGame("recover-rematch", GameStatus.ROUND_AWAITING_REMATCH);
+        rematch.setRematchDecisionSeconds(17L);
+
+        List<Game> activeGames = List.of(
+                intro, initialPeek, roundActive, peekSelection, peekReveal, swap, reveal, rematch);
+        Mockito.when(gameRepository.findTop200ByStatusNotOrderByIdAsc(GameStatus.ROUND_ENDED))
+                .thenReturn(activeGames);
+        Mockito.when(gameRepository.findById(Mockito.anyString())).thenAnswer(invocation -> activeGames.stream()
+                .filter(game -> game.getId().equals(invocation.getArgument(0)))
+                .findFirst());
+
+        gameService.recoverPersistedGameTimersAfterStartup();
+        gameService.recoverPersistedGameTimersAfterStartup();
+
+        ArgumentCaptor<Long> delayCaptor = ArgumentCaptor.forClass(Long.class);
+        Mockito.verify(scheduler, Mockito.times(8)).schedule(
+                Mockito.any(Runnable.class), delayCaptor.capture(), Mockito.eq(TimeUnit.SECONDS));
+        assertEquals(List.of(10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L),
+                delayCaptor.getAllValues().stream().sorted().toList());
+    }
+
+    @Test
+    void staleEndedGameCleanup_forgetsPublicationVersionOnlyAfterCommit() throws Exception {
+        Game staleGame = persistedGame("stale-ended-game", GameStatus.ROUND_ENDED);
+        staleGame.setRoundEndedAt(Instant.EPOCH);
+        Mockito.when(gameRepository.findTop200ByStatusAndRoundEndedAtBeforeOrderByRoundEndedAtAsc(
+                Mockito.eq(GameStatus.ROUND_ENDED), Mockito.any(Instant.class)))
+                .thenReturn(List.of(staleGame));
+
+        Method method = GameService.class.getDeclaredMethod("maybeCleanupStaleEndedGames", long.class);
+        method.setAccessible(true);
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            method.invoke(gameService, System.currentTimeMillis());
+
+            Mockito.verify(gameRepository).deleteAllInBatch(List.of(staleGame));
+            Mockito.verify(gameEventPublisher, Mockito.never()).forgetGame("stale-ended-game");
+
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(TransactionSynchronization::afterCommit);
+            Mockito.verify(gameEventPublisher).forgetGame("stale-ended-game");
+        } finally {
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    private Game persistedGame(String id, GameStatus status) {
+        Game game = new Game();
+        game.setId(id);
+        game.setStatus(status);
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        return game;
     }
 
     @Test
@@ -386,7 +521,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
-    void getSyncStateSnapshotForToken_includesCaboAndTimeoutFlags() {
+    void getSyncStateSnapshotForToken_includesCaboAndTimeoutFlags() throws Exception {
         User viewer = new User();
         viewer.setId(1L);
         viewer.setToken("token-sync");
@@ -399,7 +534,16 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setCaboCalled(true);
         game.setCaboForcedByTimeout(true);
         game.setAfkTimeoutSeconds(420L);
-        game.setPlayerHands(new HashMap<>(Map.of(1L, new ArrayList<>())));
+        Card hiddenCard = new Card();
+        hiddenCard.setCode("KS");
+        hiddenCard.setValue(13);
+        hiddenCard.setVisibility(false);
+        Card visibleCard = new Card();
+        visibleCard.setCode("4H");
+        visibleCard.setValue(4);
+        visibleCard.setVisibility(true);
+        game.setPlayerHands(new HashMap<>(Map.of(
+                1L, new ArrayList<>(List.of(hiddenCard, visibleCard)))));
 
         Mockito.when(userRepository.findByToken("token-sync")).thenReturn(viewer);
         Mockito.when(gameRepository.findById(GAME_ID)).thenReturn(Optional.of(game));
@@ -412,23 +556,32 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertNotNull(payload);
         assertEquals(true, payload.getCaboCalled());
         assertEquals(true, payload.getCaboForcedByTimeout());
+        assertEquals(false, payload.getSessionEnded());
         assertEquals(420L, payload.getAfkTimeoutSeconds());
         assertEquals(List.of(2L), payload.getTimedOutPlayerIds());
+        assertEquals("", payload.getMyHand().get(0).getCode());
+        assertEquals(0, payload.getMyHand().get(0).getValue());
+        assertFalse(payload.getMyHand().get(0).getVisibility());
+        assertEquals("4H", payload.getMyHand().get(1).getCode());
+        assertEquals(4, payload.getMyHand().get(1).getValue());
+        assertTrue(payload.getMyHand().get(1).getVisibility());
+
+        game.setSessionEnded(true);
+        Method invalidate = GameService.class.getDeclaredMethod(
+                "invalidateSyncStateCacheForGame", String.class);
+        invalidate.setAccessible(true);
+        invalidate.invoke(gameService, GAME_ID);
+
+        GameService.SyncStateSnapshot endedSnapshot =
+                gameService.getSyncStateSnapshotForToken(GAME_ID, "token-sync");
+        assertEquals(true, endedSnapshot.getPayload().getSessionEnded());
+        assertFalse(snapshot.getEtag().equals(endedSnapshot.getEtag()),
+                "The ETag must change when the persistent session boundary changes");
     }
 
     // placeholder testing 1/3
     @Test
     void startGame_validPlayers_returnsSavedGameWithId() {
-        List<CardDTO> deck = new ArrayList<>();
-        for (int i = 0; i < 52; i++) {
-            CardDTO dto = new CardDTO();
-            dto.setCode("AS");
-            deck.add(dto);
-        }
-        Mockito.when(deckOfCardsAPIService.createNewDeckId()).thenReturn("test-deck-id");
-        // doNothing because method is void
-        Mockito.doNothing().when(deckOfCardsAPIService).shuffleDeck(Mockito.anyString());
-        Mockito.when(deckOfCardsAPIService.drawFromDeck(Mockito.eq("test-deck-id"), Mockito.eq(52))).thenReturn(deck);
         Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(inv -> {
             Game g = inv.getArgument(0);
             g.setId("game-1");
@@ -441,13 +594,14 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertNotNull(result);
         assertEquals("game-1", result.getId());
         assertEquals(2, result.getOrderedPlayerIds().size());
+        assertNull(result.getDeckApiId());
+        Mockito.verifyNoInteractions(deckOfCardsAPIService);
         Mockito.verify(gameEventPublisher, Mockito.times(1)).publishFilteredState(result);
     }
 
     // placeholder testing 2/3  
     @Test
-    void startGame_whenDeckApiFails_usesFallbackDeckAndStillStarts() {
-        Mockito.when(deckOfCardsAPIService.createNewDeckId()).thenThrow(new RuntimeException("Deck API down"));
+    void startGame_usesCompleteLocalDeckAndStillStarts() {
         Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(inv -> {
             Game g = inv.getArgument(0);
             g.setId("game-fallback");
@@ -464,6 +618,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertEquals(4, result.getPlayerHands().get(2L).size());
         assertEquals(43, result.getDrawPile().size());
         assertEquals(1, result.getDiscardPile().size());
+        Mockito.verifyNoInteractions(deckOfCardsAPIService);
         Mockito.verify(gameEventPublisher, Mockito.times(1)).publishFilteredState(result);
     }
 
@@ -514,8 +669,8 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertEquals(2L, game.getCurrentPlayerId());
 
         // make sure game was saved and state was published
-        Mockito.verify(gameRepository, Mockito.times(2)).save(game);
-        Mockito.verify(gameEventPublisher, Mockito.times(2)).publishFilteredState(game);
+        Mockito.verify(gameRepository, Mockito.times(1)).save(game);
+        Mockito.verify(gameEventPublisher, Mockito.times(1)).publishFilteredState(game);
     }
 
     // this tests that the correct ability is triggered if the card has an ability and that the 
@@ -594,8 +749,8 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertEquals(GameStatus.ROUND_ACTIVE, game.getStatus());
         assertEquals(2L, game.getCurrentPlayerId());
 
-        Mockito.verify(gameRepository, Mockito.times(2)).save(game);
-        Mockito.verify(gameEventPublisher, Mockito.times(2)).publishFilteredState(game);
+        Mockito.verify(gameRepository, Mockito.times(1)).save(game);
+        Mockito.verify(gameEventPublisher, Mockito.times(1)).publishFilteredState(game);
     }
 
     @Test
@@ -788,8 +943,8 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertTrue(newTop.getVisibility());
         assertEquals(2L, game.getCurrentPlayerId());
 
-        Mockito.verify(gameRepository, Mockito.times(3)).save(game);
-        Mockito.verify(gameEventPublisher, Mockito.times(3)).publishFilteredState(game);
+        Mockito.verify(gameRepository, Mockito.times(2)).save(game);
+        Mockito.verify(gameEventPublisher, Mockito.times(2)).publishFilteredState(game);
     }
 
     @Test
@@ -908,8 +1063,8 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertEquals(3, newTop.getValue());
         assertTrue(newTop.getVisibility());
         assertEquals(2L, game.getCurrentPlayerId());
-        Mockito.verify(gameRepository, Mockito.times(2)).save(game);
-        Mockito.verify(gameEventPublisher, Mockito.times(2)).publishFilteredState(game);
+        Mockito.verify(gameRepository, Mockito.times(1)).save(game);
+        Mockito.verify(gameEventPublisher, Mockito.times(1)).publishFilteredState(game);
     }
 
     // #67: tests broadcast mapper in combination with real service logic execution
@@ -1299,7 +1454,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
-    public void moveDrawFromDrawPile_emptyDrawPile_triggersAPIShuffleAndDrawsCard() {
+    public void moveDrawFromDrawPile_emptyDrawPile_reshufflesLocallyAndDrawsCard() {
 
         User user = new User();
         user.setId(1L);
@@ -1325,26 +1480,15 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
         when(userRepository.findByToken("testToken")).thenReturn(user);
 
-        doNothing().when(deckOfCardsAPIService).returnDrawnCardsToDeck(eq("testId"), anyList());
-        doNothing().when(deckOfCardsAPIService).shuffleDeck(eq("testId"));
-        
-        CardDTO fresh1 = new CardDTO();
-        fresh1.setCode("2H");
-        CardDTO fresh2 = new CardDTO();
-        fresh2.setCode("3C");
-        when(deckOfCardsAPIService.drawFromDeck(eq("testId"), eq(2))).thenReturn(List.of(fresh1, fresh2));
-
         gameService.moveDrawFromDrawPile("gameId", "testToken");
 
-        verify(deckOfCardsAPIService).returnDrawnCardsToDeck(eq("testId"), anyList());
-        verify(deckOfCardsAPIService).shuffleDeck(eq("testId"));
-        verify(deckOfCardsAPIService).drawFromDeck(eq("testId"), eq(2));
+        Mockito.verifyNoInteractions(deckOfCardsAPIService);
 
         assertEquals(1, game.getDiscardPile().size(), "Discard pile should have 1 card left");
         assertEquals("AS", game.getDiscardPile().get(0).getCode());
 
         assertNotNull(game.getDrawnCard(), "A card should have been drawn");
-        assertEquals("2H", game.getDrawnCard().getCode());
+        assertTrue(List.of("2H", "3C").contains(game.getDrawnCard().getCode()));
 
         assertEquals(1, game.getDrawPile().size(), "Draw pile should have 1 card left");
     }
@@ -1694,51 +1838,46 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
-    void resolveRematchDecision_totalScoreHits100_reducesTo50Once() throws Exception {
+    void saveRoundScore_totalHits100_reducesBeforeGameOverAndOnlyOnce() {
         Game game = new Game();
         game.setId("g-91");
-        game.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
         game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
-        game.setRematchDecisionByUserId(new HashMap<>(Map.of(
-                1L, GameService.REMATCH_DECISION_NONE,
-                2L, GameService.REMATCH_DECISION_NONE
-        )));
         Mockito.when(gameRepository.findById("g-91")).thenReturn(Optional.of(game));
-        Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
 
         Session session = new Session();
         session.setSessionId("S91");
-        session.setUserScoresPerRound(new ArrayList<>(List.of(
-                // round 1 user 1: 60
-                // round 1 user 2: 12
-                // round 2 user 1: 40
-                // round 2 user 2: 5
-                new HashMap<>(Map.of(1L, 60, 2L, 12)),
-                new HashMap<>(Map.of(1L, 40, 2L, 5))
-        )));
+        session.setUserScoresPerRound(new ArrayList<>(List.of(new HashMap<>(Map.of(1L, 90, 2L, 30)))));
+        session.setTotalScoreByUserId(new HashMap<>(Map.of(1L, 90, 2L, 30)));
         Mockito.when(lobbyService.findPlayingSessionIdForPlayers(game.getOrderedPlayerIds())).thenReturn("S91");
         Mockito.when(sessionRepository.findBySessionId("S91")).thenReturn(session);
-        Mockito.when(sessionRepository.save(Mockito.any(Session.class))).thenAnswer(inv -> inv.getArgument(0));
+        Mockito.when(gameSettings.getScoreLimit()).thenReturn(100);
+        Mockito.when(gameSettings.getRoundLimit()).thenReturn(100);
 
-        // get the resolve method
-        Method resolve = GameService.class.getDeclaredMethod("resolveRematchDecisionLocked", String.class, Game.class, Long.class);
-        // set accessible because method is private
-        resolve.setAccessible(true);
-        // code not triggered by timer, so last argument null
-        resolve.invoke(gameService, "g-91", game, null);
+        User first = new User();
+        first.setId(1L);
+        first.setRoundsPlayed(1);
+        first.setTotalRoundPointsAccumulated(90);
+        User second = new User();
+        second.setId(2L);
+        second.setRoundsPlayed(1);
+        second.setTotalRoundPointsAccumulated(30);
+        Mockito.when(userRepository.findAllById(Mockito.anyCollection())).thenReturn(List.of(first, second));
 
-        // round counts start from 0, so at index 1 we have second round
-        // latest round score must stay unchanged (reduction now affects only total score)
-        assertEquals(40, session.getUserScoresPerRound().get(1).get(1L));
-        // second user's score from last round unaffected
-        assertEquals(5, session.getUserScoresPerRound().get(1).get(2L));
-        // first user's score 50 instead of 100
+        boolean firstGameOver = gameService.saveRoundScoreAndCheckGameOver(
+                "g-91", Map.of(1L, 10, 2L, 5));
+
+        assertFalse(firstGameOver, "exactly 100 must reduce to 50 before the score-limit check");
         assertEquals(50, session.getTotalScoreByUserId().get(1L));
-        // second user's score is just the total of rounds, unaffected
-        assertEquals(17, session.getTotalScoreByUserId().get(2L));
-        // 100 -> 50 reduction applied to 1st user, but not 2nd user
+        assertEquals(35, session.getTotalScoreByUserId().get(2L));
         assertTrue(Boolean.TRUE.equals(session.getHundredReductionAppliedByUserId().get(1L)));
-        assertNull(session.getHundredReductionAppliedByUserId().get(2L));
+        assertFalse(session.isEnded());
+
+        boolean secondGameOver = gameService.saveRoundScoreAndCheckGameOver(
+                "g-91", Map.of(1L, 50, 2L, 5));
+
+        assertTrue(secondGameOver, "the same player must not receive the reduction twice");
+        assertEquals(100, session.getTotalScoreByUserId().get(1L));
+        assertTrue(session.isEnded());
     }
 
     @Test
@@ -1781,6 +1920,71 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
                 eq(2L));
         // verify that fresh rematch requester id is reset to null for further gameplay
         assertNull(game.getFreshRematchRequesterUserId());
+    }
+
+    @Test
+    void submitRematchDecision_endedSessionRejectsContinueButAllowsFresh() {
+        User user = new User();
+        user.setId(1L);
+        Mockito.when(userRepository.findByToken("t1")).thenReturn(user);
+
+        Game game = new Game();
+        game.setId("g-ended-session-rematch");
+        game.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        game.setRematchDecisionByUserId(new HashMap<>());
+
+        Session endedSession = new Session();
+        endedSession.setSessionId("ended-session");
+        endedSession.setEnded(true);
+
+        Mockito.when(gameRepository.findById(game.getId())).thenReturn(Optional.of(game));
+        Mockito.when(lobbyService.findPlayingSessionIdForPlayers(game.getOrderedPlayerIds()))
+                .thenReturn(endedSession.getSessionId());
+        Mockito.when(sessionRepository.findBySessionId(endedSession.getSessionId()))
+                .thenReturn(endedSession);
+        Mockito.when(gameRepository.save(Mockito.any(Game.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ResponseStatusException conflict = assertThrows(
+                ResponseStatusException.class,
+                () -> gameService.submitRematchDecision(
+                        game.getId(), "t1", GameService.REMATCH_DECISION_CONTINUE));
+
+        assertEquals(HttpStatus.CONFLICT, conflict.getStatusCode());
+        assertEquals("Session already ended; choose FRESH or NONE", conflict.getReason());
+        assertTrue(game.isSessionEnded(), "The legacy/cold-session fallback must detect the ended session");
+        Mockito.verify(gameRepository).save(game);
+        Mockito.verify(gameEventPublisher).publishFilteredState(game);
+
+        assertDoesNotThrow(() -> gameService.submitRematchDecision(
+                game.getId(), "t1", GameService.REMATCH_DECISION_FRESH));
+        assertEquals(GameService.REMATCH_DECISION_FRESH, game.getRematchDecisionByUserId().get(1L));
+        Mockito.verify(gameRepository, Mockito.times(2)).save(game);
+    }
+
+    @Test
+    void resolveRematchDecision_endedSessionDropsLegacyContinueVotes() throws Exception {
+        Game game = new Game();
+        game.setId("g-ended-session-resolution");
+        game.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
+        game.setSessionEnded(true);
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        game.setRematchDecisionByUserId(new HashMap<>(Map.of(
+                1L, GameService.REMATCH_DECISION_CONTINUE,
+                2L, GameService.REMATCH_DECISION_CONTINUE)));
+
+        Mockito.when(gameRepository.save(Mockito.any(Game.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        Method resolve = GameService.class.getDeclaredMethod(
+                "resolveRematchDecisionLocked", String.class, Game.class, Long.class);
+        resolve.setAccessible(true);
+        resolve.invoke(gameService, game.getId(), game, null);
+
+        assertEquals(GameStatus.ROUND_ENDED, game.getStatus());
+        Mockito.verify(lobbyService).handleRoundResolvedForGamePlayers(
+                eq(List.of(1L, 2L)), eq(List.of()), eq(List.of()), Mockito.isNull());
     }
 
     @Test
@@ -1859,49 +2063,80 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
-    void resolveRematchDecision_totalScoreHits100Again_noSecondReductionForSamePlayer() throws Exception {
+    void submitRematchDecision_retryAfterOptimisticConflict_persistsDecision() {
+        String gameId = "g-rematch-conflict-retry";
+        User user = new User();
+        user.setId(1L);
+        Mockito.when(userRepository.findByToken("t1")).thenReturn(user);
+
+        Game conflictedAttempt = new Game();
+        conflictedAttempt.setId(gameId);
+        conflictedAttempt.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
+        conflictedAttempt.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        conflictedAttempt.setRematchDecisionByUserId(new HashMap<>());
+
+        Game retryFromDatabase = new Game();
+        retryFromDatabase.setId(gameId);
+        retryFromDatabase.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
+        retryFromDatabase.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        retryFromDatabase.setRematchDecisionByUserId(new HashMap<>());
+
+        Mockito.when(gameRepository.findById(gameId))
+                .thenReturn(Optional.of(conflictedAttempt), Optional.of(retryFromDatabase));
+        Mockito.when(gameRepository.save(Mockito.any(Game.class)))
+                .thenThrow(new ObjectOptimisticLockingFailureException("Game", gameId))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThrows(ObjectOptimisticLockingFailureException.class,
+                () -> gameService.submitRematchDecision(
+                        gameId, "t1", GameService.REMATCH_DECISION_CONTINUE));
+
+        assertDoesNotThrow(() -> gameService.submitRematchDecision(
+                gameId, "t1", GameService.REMATCH_DECISION_CONTINUE));
+
+        assertEquals(GameService.REMATCH_DECISION_CONTINUE,
+                retryFromDatabase.getRematchDecisionByUserId().get(1L));
+        Mockito.verify(gameRepository, Mockito.times(2)).findById(gameId);
+        Mockito.verify(gameRepository, Mockito.times(2)).save(Mockito.any(Game.class));
+        Mockito.verify(gameEventPublisher, Mockito.times(1)).publishFilteredState(retryFromDatabase);
+    }
+
+    @Test
+    void saveRoundScore_roundLimitUsesReducedTotalsForWinnerAndSessionStatistics() {
         Game game = new Game();
-        game.setId("g-91-once");
-        game.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
-        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L)));
-        game.setRematchDecisionByUserId(new HashMap<>(Map.of(1L, GameService.REMATCH_DECISION_NONE)));
-        Mockito.when(gameRepository.findById("g-91-once")).thenReturn(Optional.of(game));
-        Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+        game.setId("g-91-round-limit");
+        game.setOrderedPlayerIds(new ArrayList<>(List.of(1L, 2L)));
+        Mockito.when(gameRepository.findById("g-91-round-limit")).thenReturn(Optional.of(game));
 
         Session session = new Session();
-        session.setSessionId("S91-ONCE");
-        session.setUserScoresPerRound(new ArrayList<>(List.of(
-                new HashMap<>(Map.of(1L, 60)),
-                new HashMap<>(Map.of(1L, 40))
-        )));
+        session.setSessionId("S91-ROUND-LIMIT");
+        session.setUserScoresPerRound(new ArrayList<>(List.of(new HashMap<>(Map.of(1L, 90, 2L, 40)))));
+        session.setTotalScoreByUserId(new HashMap<>(Map.of(1L, 90, 2L, 40)));
         Mockito.when(lobbyService.findPlayingSessionIdForPlayers(game.getOrderedPlayerIds())).thenReturn("S91-ONCE");
         Mockito.when(sessionRepository.findBySessionId("S91-ONCE")).thenReturn(session);
-        Mockito.when(sessionRepository.save(Mockito.any(Session.class))).thenAnswer(inv -> inv.getArgument(0));
+        Mockito.when(gameSettings.getScoreLimit()).thenReturn(1000);
+        Mockito.when(gameSettings.getRoundLimit()).thenReturn(2);
 
-        // get the resolve method
-        Method resolve = GameService.class.getDeclaredMethod("resolveRematchDecisionLocked", String.class, Game.class, Long.class);
-        // set accessible because method is private
-        resolve.setAccessible(true);
-        // code not triggered by timer, so last argument null
-        resolve.invoke(gameService, "g-91-once", game, null);
-        // latest round score stays untouched, but total score is reduced from 100 to 50 once
-        assertEquals(40, session.getUserScoresPerRound().get(1).get(1L));
-        assertEquals(50, session.getTotalScoreByUserId().get(1L));
+        User first = new User();
+        first.setId(1L);
+        first.setRoundsPlayed(1);
+        first.setTotalRoundPointsAccumulated(90);
+        User second = new User();
+        second.setId(2L);
+        second.setRoundsPlayed(1);
+        second.setTotalRoundPointsAccumulated(40);
+        Mockito.when(userRepository.findAllById(Mockito.anyCollection())).thenReturn(List.of(first, second));
 
-        // resolve changed the status, but to check to logic that the "100 -> 50" rule does not run again,
-        // we need to be in this status again
-        game.setStatus(GameStatus.ROUND_AWAITING_REMATCH);
-        // total is 100 again
-        session.getUserScoresPerRound().add(new HashMap<>(Map.of(1L, 50))); 
-        session.getTotalScoreByUserId().put(1L, 100);
-        // resolve again, given adjusted scores
-        resolve.invoke(gameService, "g-91-once", game, null);
+        boolean gameOver = gameService.saveRoundScoreAndCheckGameOver(
+                "g-91-round-limit", Map.of(1L, 10, 2L, 20));
 
-        // last round's score stays 50
-        assertEquals(50, session.getUserScoresPerRound().get(2).get(1L));
-        // total stays 100, does not get rewritten
-        assertEquals(100, session.getTotalScoreByUserId().get(1L));
-        assertTrue(Boolean.TRUE.equals(session.getHundredReductionAppliedByUserId().get(1L)));
+        assertTrue(gameOver);
+        assertEquals(Map.of(1L, 50, 2L, 60), session.getTotalScoreByUserId());
+        assertEquals(List.of(1L), session.getWinnerIds());
+        assertEquals(1, first.getGamesWon());
+        assertEquals(50, first.getTotalPointsAccumulated());
+        assertEquals(1, second.getGamesLost());
+        assertEquals(60, second.getTotalPointsAccumulated());
     }
 
 
@@ -1923,19 +2158,12 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         Card cardAfterReshuffle = new Card();
         cardAfterReshuffle.setCode("2H");
         cardAfterReshuffle.setValue(2);
+        Card discardTop = new Card();
+        discardTop.setCode("5S");
+        discardTop.setValue(5);
+        game.setDiscardPile(new ArrayList<>(List.of(cardAfterReshuffle, discardTop)));
 
-        // Mock behavior: 
-        // 1. First call to findById returns empty draw pile game
-        // 2. We mock the reshuffle (you can verify it was called if you want)
-        // 3. We simulate the "reload" by having the second call return a game with cards
-        Mockito.when(gameRepository.findById("g-reshuffle")).thenAnswer(new org.mockito.stubbing.Answer<Optional<Game>>() {
-            private int count = 0;
-            public Optional<Game> answer(org.mockito.invocation.InvocationOnMock invocation) {
-                if (count++ == 0) return Optional.of(game); // First call (empty)
-                game.setDrawPile(new ArrayList<>(List.of(cardAfterReshuffle))); // Simulate reshuffle result
-                return Optional.of(game); // Second call (filled)
-            }
-        });
+        Mockito.when(gameRepository.findById("g-reshuffle")).thenReturn(Optional.of(game));
         Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
         Mockito.when(userRepository.findByToken("testToken")).thenReturn(user);
 
@@ -2204,6 +2432,136 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
+    void executeTimoutMove_caboReveal_isCompleteNoOp() {
+        String gameId = "g-stale-timeout-cabo-reveal";
+        Game game = new Game();
+        game.setId(gameId);
+        game.setStatus(GameStatus.CABO_REVEAL);
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setCurrentPlayerId(2L);
+        game.setCaboCalled(true);
+        game.setCaboCalledByUserId(1L);
+
+        Card playerOneCard = new Card();
+        playerOneCard.setValue(2);
+        Card playerTwoCard = new Card();
+        playerTwoCard.setValue(8);
+        game.setPlayerHands(Map.of(1L, List.of(playerOneCard), 2L, List.of(playerTwoCard)));
+        game.setDrawPile(new ArrayList<>());
+        game.setDiscardPile(new ArrayList<>());
+
+        when(gameRepository.findById(gameId)).thenReturn(Optional.of(game));
+
+        gameService.executeTimoutMove(gameId, 2L);
+
+        assertEquals(GameStatus.CABO_REVEAL, game.getStatus());
+        assertEquals(2L, game.getCurrentPlayerId(), "A stale timeout must not advance during reveal");
+        assertTrue(game.getDrawPile().isEmpty());
+        assertTrue(game.getDiscardPile().isEmpty());
+        Mockito.verify(gameRepository, Mockito.never()).save(Mockito.any(Game.class));
+        Mockito.verify(gameEventPublisher, Mockito.never()).publishFilteredState(Mockito.any(Game.class));
+        Mockito.verify(lobbyService, Mockito.never()).findPlayingSessionIdForPlayers(Mockito.anyList());
+        Mockito.verify(sessionRepository, Mockito.never()).findById(Mockito.anyLong());
+        Mockito.verify(sessionRepository, Mockito.never()).save(Mockito.any(Session.class));
+        Mockito.verify(userRepository, Mockito.never()).save(Mockito.any(User.class));
+        Mockito.verify(userRepository, Mockito.never()).saveAll(Mockito.any());
+        Mockito.verify(scheduler, Mockito.never()).schedule(
+                Mockito.any(Runnable.class), Mockito.anyLong(), Mockito.any(TimeUnit.class));
+    }
+
+    @Test
+    void executeTimoutMove_abilityPhases_areNoOp() {
+        List<GameStatus> abilityStatuses = List.of(
+                GameStatus.ABILITY_PEEK_SELF,
+                GameStatus.ABILITY_PEEK_OPPONENT,
+                GameStatus.ABILITY_SWAP);
+        Map<String, Game> games = new HashMap<>();
+        for (GameStatus status : abilityStatuses) {
+            Game game = new Game();
+            game.setId("g-stale-turn-" + status.name());
+            game.setStatus(status);
+            game.setOrderedPlayerIds(List.of(1L, 2L));
+            game.setCurrentPlayerId(1L);
+            Card drawCard = new Card();
+            drawCard.setCode("7H");
+            game.setDrawPile(new ArrayList<>(List.of(drawCard)));
+            game.setDiscardPile(new ArrayList<>());
+            games.put(game.getId(), game);
+        }
+        when(gameRepository.findById(Mockito.anyString()))
+                .thenAnswer(invocation -> Optional.ofNullable(games.get(invocation.getArgument(0))));
+
+        for (Game game : games.values()) {
+            gameService.executeTimoutMove(game.getId(), 1L);
+            assertEquals(1L, game.getCurrentPlayerId());
+            assertEquals(1, game.getDrawPile().size());
+            assertTrue(game.getDiscardPile().isEmpty());
+        }
+
+        Mockito.verify(gameRepository, Mockito.never()).save(Mockito.any(Game.class));
+        Mockito.verify(gameEventPublisher, Mockito.never()).publishFilteredState(Mockito.any(Game.class));
+        Mockito.verify(scheduler, Mockito.never()).schedule(
+                Mockito.any(Runnable.class), Mockito.anyLong(), Mockito.any(TimeUnit.class));
+    }
+
+    @Test
+    void advanceTurnToNextPlayer_caboReveal_cannotWrapAndScoreAgain() {
+        String gameId = "g-defensive-reveal-wrap";
+        Game game = new Game();
+        game.setId(gameId);
+        game.setStatus(GameStatus.CABO_REVEAL);
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setCurrentPlayerId(2L);
+        game.setCaboCalled(true);
+        game.setCaboCalledByUserId(1L);
+        game.setPlayerHands(new HashMap<>());
+
+        when(gameRepository.findById(gameId)).thenReturn(Optional.of(game));
+
+        gameService.advanceTurnToNextPlayer(gameId);
+
+        assertEquals(GameStatus.CABO_REVEAL, game.getStatus());
+        assertEquals(2L, game.getCurrentPlayerId());
+        Mockito.verify(gameRepository, Mockito.never()).save(Mockito.any(Game.class));
+        Mockito.verify(sessionRepository, Mockito.never()).findById(Mockito.anyLong());
+        Mockito.verify(userRepository, Mockito.never()).saveAll(Mockito.any());
+    }
+
+    @Test
+    void replacedTurnTimer_queuedOldCallback_isNoOp() throws Exception {
+        String gameId = "g-replaced-turn-timer";
+        Game game = new Game();
+        game.setId(gameId);
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setCurrentPlayerId(1L);
+        game.setTurnSeconds(30L);
+        Card drawCard = new Card();
+        drawCard.setCode("4H");
+        game.setDrawPile(new ArrayList<>(List.of(drawCard)));
+        game.setDiscardPile(new ArrayList<>());
+
+        when(gameRepository.findById(gameId)).thenReturn(Optional.of(game));
+
+        Method startTurnTimer = GameService.class.getDeclaredMethod("startTurnTimer", String.class, Long.class);
+        startTurnTimer.setAccessible(true);
+        startTurnTimer.invoke(gameService, gameId, 1L);
+        startTurnTimer.invoke(gameService, gameId, 1L);
+
+        ArgumentCaptor<Runnable> callbackCaptor = ArgumentCaptor.forClass(Runnable.class);
+        Mockito.verify(scheduler, Mockito.times(2)).schedule(
+                callbackCaptor.capture(), Mockito.eq(30L), Mockito.eq(TimeUnit.SECONDS));
+
+        callbackCaptor.getAllValues().get(0).run();
+
+        assertEquals(1L, game.getCurrentPlayerId(), "The replaced callback must not advance the turn");
+        assertEquals(1, game.getDrawPile().size(), "The replaced callback must not draw");
+        assertTrue(game.getDiscardPile().isEmpty(), "The replaced callback must not discard");
+        Mockito.verify(gameRepository, Mockito.never()).save(Mockito.any(Game.class));
+        Mockito.verify(userRepository, Mockito.never()).saveAll(Mockito.any());
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void findActiveGameForUser_recentNoGameFallback_skipsLobbyAndGameQueries() throws Exception {
         Long userId = 55L;
@@ -2428,6 +2786,38 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         // 4. Assertion
         assertTrue(isGameOver, "Game should be over because score limit was reached.");
         assertTrue(session.isEnded(), "Session should be marked as ended.");
+        assertTrue(game.isSessionEnded(), "The game must persist the ended-session rematch boundary.");
+    }
+
+    @Test
+    void saveRoundScoreAndCheckGameOver_alreadyEndedSessionIsImmutableAndMarksGame() {
+        Game game = new Game();
+        game.setId("already-ended-game");
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+
+        List<Map<Long, Integer>> historicRounds = new ArrayList<>(
+                List.of(new HashMap<>(Map.of(1L, 10, 2L, 20))));
+        Map<Long, Integer> historicTotals = new HashMap<>(Map.of(1L, 10, 2L, 20));
+        Session session = new Session();
+        session.setSessionId("already-ended-session");
+        session.setEnded(true);
+        session.setUserScoresPerRound(historicRounds);
+        session.setTotalScoreByUserId(historicTotals);
+
+        Mockito.when(gameRepository.findById(game.getId())).thenReturn(Optional.of(game));
+        Mockito.when(lobbyService.findPlayingSessionIdForPlayers(game.getOrderedPlayerIds()))
+                .thenReturn(session.getSessionId());
+        Mockito.when(sessionRepository.findBySessionId(session.getSessionId())).thenReturn(session);
+
+        boolean sessionOver = gameService.saveRoundScoreAndCheckGameOver(
+                game.getId(), Map.of(1L, 99, 2L, 99));
+
+        assertTrue(sessionOver);
+        assertTrue(game.isSessionEnded());
+        assertEquals(List.of(Map.of(1L, 10, 2L, 20)), session.getUserScoresPerRound());
+        assertEquals(Map.of(1L, 10, 2L, 20), session.getTotalScoreByUserId());
+        Mockito.verify(sessionRepository, Mockito.never()).save(Mockito.any(Session.class));
+        Mockito.verify(userRepository, Mockito.never()).saveAll(Mockito.any());
     }
 
     @Test
@@ -2460,6 +2850,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         // 4. Assertion
         assertTrue(isGameOver, "Game should be over because round limit was reached.");
         assertTrue(session.isEnded(), "Session should be marked as ended.");
+        assertTrue(game.isSessionEnded(), "The game must persist the ended-session rematch boundary.");
     }
 
     @Test
@@ -2601,83 +2992,39 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
-    void resumeGame_sessionNotFound_throwsNotFound() {
-        // 1. Setup: Repository returns empty
-        Mockito.when(sessionRepository.findById(99L)).thenReturn(Optional.empty());
+    void saveRoundScore_userStatisticFailurePropagatesForTransactionRollback() {
+        Game game = new Game();
+        game.setId("test-game-123");
+        game.setOrderedPlayerIds(List.of(1L, 2L));
 
-        // 2. Action & Assertion
-        ResponseStatusException exception = assertThrows(ResponseStatusException.class, () -> {
-            gameService.resumeGame(99L);
-        });
+        Session session = new Session();
+        session.setSessionId("session-123");
+        session.setAbsentRoundPoints(20L);
+        session.setUserScoresPerRound(new ArrayList<>());
+        session.setTotalScoreByUserId(new HashMap<>(Map.of(1L, 0, 2L, 0)));
 
-        assertEquals(HttpStatus.NOT_FOUND, exception.getStatusCode());
-        assertEquals("Session not found", exception.getReason());
-    }
+        User firstUser = new User();
+        firstUser.setId(1L);
+        User secondUser = new User();
+        secondUser.setId(2L);
 
-    @Test
-    void resumeGame_sessionEnded_throwsBadRequest() {
-        // 1. Setup: Session exists, but is marked as ended
-        Session endedSession = new Session();
-        endedSession.setEnded(true);
-        Mockito.when(sessionRepository.findById(1L)).thenReturn(Optional.of(endedSession));
+        Mockito.when(gameRepository.findById("test-game-123")).thenReturn(Optional.of(game));
+        Mockito.when(lobbyService.findPlayingSessionIdForPlayers(game.getOrderedPlayerIds()))
+                .thenReturn("session-123");
+        Mockito.when(sessionRepository.findBySessionId("session-123")).thenReturn(session);
+        Mockito.when(userRepository.findAllById(Mockito.anyCollection()))
+                .thenReturn(List.of(firstUser, secondUser));
+        Mockito.doThrow(new IllegalStateException("statistics write failed"))
+                .when(userRepository).saveAll(Mockito.anyList());
 
-        // 2. Action & Assertion
-        ResponseStatusException exception = assertThrows(ResponseStatusException.class, () -> {
-            gameService.resumeGame(1L);
-        });
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> gameService.saveRoundScoreAndCheckGameOver(
+                        "test-game-123",
+                        Map.of(1L, 10, 2L, 5)));
 
-        assertEquals(HttpStatus.BAD_REQUEST, exception.getStatusCode());
-        assertEquals("Session already finished", exception.getReason());
-    }
-
-    @Test
-    void resumeGame_noPlayers_throwsBadRequest() {
-        // 1. Setup: Session exists, is not ended, but the score map is completely empty
-        Session emptySession = new Session();
-        emptySession.setEnded(false);
-        emptySession.setTotalScoreByUserId(new HashMap<>()); // No players!
-        Mockito.when(sessionRepository.findById(1L)).thenReturn(Optional.of(emptySession));
-
-        // 2. Action & Assertion
-        ResponseStatusException exception = assertThrows(ResponseStatusException.class, () -> {
-            gameService.resumeGame(1L);
-        });
-
-        assertEquals(HttpStatus.BAD_REQUEST, exception.getStatusCode());
-        assertEquals("No players found in this session", exception.getReason());
-    }
-
-    @Test
-    void resumeGame_validSession_startsAndReturnsNewGame() {
-        // 1. Setup: A valid session with 2 players who have scores
-        Session validSession = new Session();
-        validSession.setEnded(false);
-        validSession.setTotalScoreByUserId(Map.of(1L, 50, 2L, 30));
-        Mockito.when(sessionRepository.findById(1L)).thenReturn(Optional.of(validSession));
-
-        // We must mock the game settings because the internal startGame() method will ask for them!
-        Mockito.when(gameSettings.getMinPlayers()).thenReturn(2);
-        Mockito.when(gameSettings.getMaxPlayers()).thenReturn(4);
-        Mockito.when(gameSettings.getStarterCardsPerPlayer()).thenReturn(4);
-
-        // Tell the repository to just return whatever game we try to save
-        Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
-
-        // 2. Action
-        Game resumedGame = gameService.resumeGame(1L);
-
-        // 3. Assertion
-        assertNotNull(resumedGame, "The resumed game should not be null");
-        assertEquals(1L, resumedGame.getResumedFromSessionId(), "The session ID should be attached to the new game");
-        
-        // Verify that the new game correctly pulled the players from the session
-        assertEquals(2, resumedGame.getOrderedPlayerIds().size(), "Game should have exactly 2 players");
-        assertTrue(resumedGame.getOrderedPlayerIds().contains(1L), "Player 1 should be in the game");
-        assertTrue(resumedGame.getOrderedPlayerIds().contains(2L), "Player 2 should be in the game");
-        
-        // Verify that the game actually got saved to the database
-        Mockito.verify(gameRepository, Mockito.times(2)).save(Mockito.any(Game.class)); 
-        // Note: times(2) because startGame saves it once, and resumeGame saves it again at the end!
+        assertEquals("statistics write failed", exception.getMessage());
+        Mockito.verify(sessionRepository, Mockito.never()).save(Mockito.any(Session.class));
     }
 
     @Test
@@ -2770,39 +3117,13 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
-    public void testResumeGame_Success() {
-        // 1. Setup: Testdaten vorbereiten
-        Long sessionId = 42L;
-        
-        // Mock-Session erstellen und konfigurieren
-        Session mockSession = org.mockito.Mockito.mock(Session.class);
-        org.mockito.Mockito.when(mockSession.isEnded()).thenReturn(false); // Session ist NICHT beendet
-        
-        // Spieler-IDs mit simulierten Punkteständen in die Session packen
-        Map<Long, Integer> totalScores = new HashMap<>();
-        totalScores.put(100L, 10);
-        totalScores.put(200L, 15);
-        org.mockito.Mockito.when(mockSession.getTotalScoreByUserId()).thenReturn(totalScores);
+    void resumeGame_isPermanentlyDisabled() {
+        ResponseStatusException exception = assertThrows(
+                ResponseStatusException.class,
+                () -> gameService.resumeGame(42L, "any-token"));
 
-        // Mocking für die Repositories und den internen Game-Start
-        org.mockito.Mockito.when(sessionRepository.findById(sessionId))
-            .thenReturn(Optional.of(mockSession));
-
-        Game mockResumedGame = new Game();
-        // Hier simulieren wir das Verhalten von startGame(playerIds)
-        // Falls deine startGame-Methode Mocks benötigt, greift das Spring Boot Mock-Setup
-        org.mockito.Mockito.when(gameRepository.save(org.mockito.Mockito.any(Game.class)))
-            .thenAnswer(invocation -> invocation.getArgument(0));
-
-        // 2. Ausführung der resumeGame Methode
-        Game result = gameService.resumeGame(sessionId);
-
-        // 3. Assertions: Überprüfen, ob das Spiel korrekt re-initialisiert wurde
-        assertNotNull(result, "Das wiederaufgenommene Spiel darf nicht null sein.");
-        assertEquals(sessionId, result.getResumedFromSessionId(), "Die resumedFromSessionId wurde nicht korrekt gesetzt.");
-        
-        // Verifizieren, dass die Session aus der DB abgefragt wurde
-        org.mockito.Mockito.verify(sessionRepository, org.mockito.Mockito.times(1)).findById(sessionId);
+        assertEquals(HttpStatus.GONE, exception.getStatusCode());
+        Mockito.verifyNoInteractions(sessionRepository);
     }
 
     @Test
@@ -2822,10 +3143,10 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         Mockito.when(gameRepository.findById("game-1")).thenReturn(Optional.of(game));
 
         // 2. Action & Assertion
-        // Because reshuffle aborts early, the draw pile stays empty and remove(0) throws an error
-        assertThrows(IndexOutOfBoundsException.class, () -> {
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class, () -> {
             gameService.moveDrawFromDrawPile("game-1", "token");
         });
+        assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
         
         // 3. Verify reshuffle aborted before saving anything
         Mockito.verify(gameRepository, Mockito.never()).save(Mockito.any(Game.class));
@@ -2853,12 +3174,13 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenAnswer(i -> i.getArgument(0));
 
         // 2. Action & Assertion
-        assertThrows(IndexOutOfBoundsException.class, () -> {
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class, () -> {
             gameService.moveDrawFromDrawPile("game-1", "token");
         });
+        assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
         
-        // 3. Verify it entered the "if (toPutIntoDrawPile.isEmpty())" block and saved the game
-        Mockito.verify(gameRepository, Mockito.times(1)).save(game);
+        // The rejected command is not persisted or broadcast.
+        Mockito.verify(gameRepository, Mockito.never()).save(game);
         assertEquals(1, game.getDiscardPile().size(), "Discard pile should retain the 1 top card");
         assertTrue(game.getDrawPile().isEmpty(), "Draw pile should be completely empty");
     }
@@ -2903,7 +3225,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
     }
 
     @Test
-    void reshuffleDiscardPile_apiThrowsException_catchesAndUsesFallbackShuffle() {
+    void reshuffleDiscardPile_legacyDeckIdStillUsesLocalShuffle() {
         // 1. Setup
         User user = new User(); user.setId(1L);
         Mockito.when(userRepository.findByToken("token")).thenReturn(user);
@@ -2926,11 +3248,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         Mockito.when(gameRepository.findById("game-1")).thenReturn(Optional.of(game));
         Mockito.when(gameRepository.save(Mockito.any(Game.class))).thenAnswer(i -> i.getArgument(0));
 
-        // Force the API to throw a catastrophic error when we try to talk to it
-        Mockito.doThrow(new RuntimeException("Deck API is offline!"))
-               .when(deckOfCardsAPIService).returnDrawnCardsToDeck(Mockito.eq("real-api-deck-123"), Mockito.anyList());
-
-        // 2. Action (This will catch the error, fallback to local shuffle, and succeed!)
+        // 2. Action: legacy persisted deck IDs are ignored.
         gameService.moveDrawFromDrawPile("game-1", "token");
         
         // 3. Verification
@@ -2938,9 +3256,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertEquals("5H", game.getDiscardPile().get(0).getCode());
         assertEquals(1, game.getDrawPile().size(), "Draw pile should have 1 card left after fallback shuffle");
         
-        // Prove that we DID try to talk to the API before the crash
-        Mockito.verify(deckOfCardsAPIService, Mockito.times(1))
-               .returnDrawnCardsToDeck(Mockito.eq("real-api-deck-123"), Mockito.anyList());
+        Mockito.verifyNoInteractions(deckOfCardsAPIService);
     }
 
     @Test
@@ -3146,7 +3462,13 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
 
         Card myCard = new Card();
         myCard.setCode("AS");
-        List<Card> expectedHand = new ArrayList<>(List.of(myCard));
+        myCard.setValue(1);
+        myCard.setVisibility(false);
+        Card visibleCard = new Card();
+        visibleCard.setCode("QH");
+        visibleCard.setValue(12);
+        visibleCard.setVisibility(true);
+        List<Card> expectedHand = new ArrayList<>(List.of(myCard, visibleCard));
 
         Game game = new Game();
         game.setId("game-123");
@@ -3159,8 +3481,14 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
 
         // 3. Assertion
         assertNotNull(returnedHand, "Hand should not be null");
-        assertEquals(1, returnedHand.size(), "Hand should contain exactly 1 card");
-        assertEquals("AS", returnedHand.get(0).getCode(), "The card should match the user's actual hand");
+        assertEquals(2, returnedHand.size(), "Hand should retain its card positions");
+        assertEquals("", returnedHand.get(0).getCode(), "Hidden card code must be redacted");
+        assertEquals(0, returnedHand.get(0).getValue(), "Hidden card value must be redacted");
+        assertFalse(returnedHand.get(0).getVisibility());
+        assertEquals("QH", returnedHand.get(1).getCode(), "Visible card code should remain available");
+        assertEquals(12, returnedHand.get(1).getValue(), "Visible card value should remain available");
+        assertTrue(returnedHand.get(1).getVisibility());
+        assertNotSame(myCard, returnedHand.get(0), "Response cards must not expose mutable game entities");
     }
 
     @Test
@@ -3393,8 +3721,16 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         List<User> savedUsers = usersCaptor.getValue();
 
         User savedAlice = savedUsers.stream().filter(u -> u.getId().equals(1L)).findFirst().orElse(null);
+        User savedBob = savedUsers.stream().filter(u -> u.getId().equals(2L)).findFirst().orElse(null);
         assertNotNull(savedAlice);
+        assertNotNull(savedBob);
         assertEquals(1, savedAlice.getGamesWon());
+        assertEquals(1, savedAlice.getRoundsWon());
+        assertEquals(1, savedBob.getRoundsWon());
+        assertEquals(1, savedAlice.getRoundsPlayed());
+        assertEquals(15, savedAlice.getTotalRoundPointsAccumulated());
+        assertEquals(15, savedAlice.getAverageScorePerRound());
+        assertEquals(15, savedAlice.getAverageScorePerSession());
     }
 
     @Test
@@ -3750,6 +4086,43 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         assertNotNull(updatedSession.getUserScoresPerRound());
         assertTrue(updatedSession.getTotalScoreByUserId().containsKey(101L));
         assertTrue(updatedSession.getTotalScoreByUserId().containsKey(103L));
+    }
+
+    @Test
+    void ensureSessionExists_lateJoinerBackfillsUserRoundCountersExactlyOnce() throws Exception {
+        Method method = GameService.class.getDeclaredMethod(
+                "ensureSessionExistsForLobbyIfNeeded", Lobby.class, List.class);
+        method.setAccessible(true);
+
+        Lobby lobby = new Lobby();
+        lobby.setSessionId("late-join-session");
+        lobby.setAbsentRoundPoints(20L);
+
+        Session session = new Session();
+        session.setSessionId("late-join-session");
+        session.setAbsentRoundPoints(20L);
+        session.setUserScoresPerRound(new ArrayList<>(List.of(
+                new HashMap<>(Map.of(1L, 5)),
+                new HashMap<>(Map.of(1L, 10))
+        )));
+        session.setTotalScoreByUserId(new HashMap<>(Map.of(1L, 15)));
+
+        User lateJoiner = new User();
+        lateJoiner.setId(2L);
+        Mockito.when(sessionRepository.findBySessionId("late-join-session")).thenReturn(session);
+        Mockito.when(userRepository.findAllById(Mockito.anyCollection())).thenReturn(List.of(lateJoiner));
+
+        method.invoke(gameService, lobby, List.of(1L, 2L));
+        method.invoke(gameService, lobby, List.of(1L, 2L));
+
+        assertEquals(20, session.getUserScoresPerRound().get(0).get(2L));
+        assertEquals(20, session.getUserScoresPerRound().get(1).get(2L));
+        assertEquals(40, session.getTotalScoreByUserId().get(2L));
+        assertEquals(2, lateJoiner.getRoundsPlayed());
+        assertEquals(40, lateJoiner.getTotalRoundPointsAccumulated());
+        assertEquals(20, lateJoiner.getAverageScorePerRound());
+        Mockito.verify(userRepository, Mockito.times(1)).saveAll(Mockito.anyList());
+        Mockito.verify(sessionRepository, Mockito.times(1)).save(session);
     }
 
     @Test
@@ -4126,7 +4499,8 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setStatus(GameStatus.ABILITY_SWAP); // Triggers normalization branch block
         game.setCaboCalled(false);
         game.setSpecialPeekUsed(true);
-        game.setOrderedPlayerIds(List.of(userId)); // Formats player lists to safe-guard turn advancements
+        game.setOrderedPlayerIds(List.of(userId, userId + 1));
+        game.setCurrentPlayerId(userId);
 
         // Mock a player hand with a visible card to verify clearAllHandVisibility execution
         Card visibleCard = new Card();
@@ -4136,6 +4510,7 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setPlayerHands(playerHands);
 
         Mockito.when(gameRepository.findById(gameId)).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         // Act - wrap in try-catch or assertDoesNotThrow to shield against subsequent internal async/timer methods
         try {
@@ -4163,12 +4538,14 @@ private org.springframework.context.ApplicationEventPublisher eventPublisher;
         game.setId(gameId);
         game.setStatus(GameStatus.ROUND_ACTIVE); // Bypasses normalization flow block directly
         game.setCaboCalled(false);
-        game.setOrderedPlayerIds(List.of(userId));
+        game.setOrderedPlayerIds(List.of(userId, userId + 1));
+        game.setCurrentPlayerId(userId);
 
         // Empty hand structure to avoid internal null-pointer loops during broadcasts
         game.setPlayerHands(new HashMap<>()); 
 
         Mockito.when(gameRepository.findById(gameId)).thenReturn(Optional.of(game));
+        Mockito.when(gameRepository.save(any(Game.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         // Act
         try {

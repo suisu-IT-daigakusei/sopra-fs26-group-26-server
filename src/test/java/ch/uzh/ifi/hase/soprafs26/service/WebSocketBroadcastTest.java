@@ -153,7 +153,7 @@ class WebSocketBroadcastTest {
         lobby.setSessionHostUserId(hostId);
         lobby.setStatus("WAITING");
         
-        Mockito.when(lobbyRepository.findBySessionId(sessionId)).thenReturn(lobby);
+        Mockito.when(lobbyRepository.findBySessionIdForUpdate(sessionId)).thenReturn(Optional.of(lobby));
         Mockito.when(lobbyRepository.save(any())).thenReturn(lobby);
 
         LobbySettingsPatchDTO settingsDTO = new LobbySettingsPatchDTO();

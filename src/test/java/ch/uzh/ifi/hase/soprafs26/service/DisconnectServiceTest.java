@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -74,7 +75,8 @@ class DisconnectServiceTest {
     void checkIdleUsers_spectator_isSkipped() {
         User spectator = createUser(7L, UserStatus.SPECTATING, AUTO_LOGOUT_TOKEN, Instant.now().minusSeconds(9999));
 
-        when(userRepository.findByStatusNot(UserStatus.OFFLINE)).thenReturn(List.of(spectator));
+        when(userRepository.findIdleCandidates(any(Instant.class), anyCollection(), any()))
+                .thenReturn(List.of(spectator));
         when(lobbyService.getPlayingLobbyPlayerIdsSnapshot()).thenReturn(Set.of());
 
         disconnectService.checkIdleUsers();
@@ -87,7 +89,8 @@ class DisconnectServiceTest {
     void checkIdleUsers_staleOnlineUser_triggersPermanentDisconnect() {
         User onlineUser = createUser(8L, UserStatus.ONLINE, "online-token", Instant.now().minusSeconds(9999));
 
-        when(userRepository.findByStatusNot(UserStatus.OFFLINE)).thenReturn(List.of(onlineUser));
+        when(userRepository.findIdleCandidates(any(Instant.class), anyCollection(), any()))
+                .thenReturn(List.of(onlineUser));
         when(lobbyService.getPlayingLobbyPlayerIdsSnapshot()).thenReturn(Set.of());
         when(userRepository.findById(8L)).thenReturn(Optional.of(onlineUser));
         when(lobbyService.isPlayerTimedOutInPlaying(8L)).thenReturn(false);
@@ -101,7 +104,8 @@ class DisconnectServiceTest {
     void checkIdleUsers_staleActiveGameUserWithActiveSession_stillTriggersPermanentDisconnect() {
         User activeGameUser = createUser(81L, UserStatus.PLAYING, "playing-token", Instant.now().minusSeconds(9999));
 
-        when(userRepository.findByStatusNot(UserStatus.OFFLINE)).thenReturn(List.of(activeGameUser));
+        when(userRepository.findIdleCandidates(any(Instant.class), anyCollection(), any()))
+                .thenReturn(List.of(activeGameUser));
         when(lobbyService.getPlayingLobbyPlayerIdsSnapshot()).thenReturn(Set.of(81L));
         when(userRepository.findById(81L)).thenReturn(Optional.of(activeGameUser));
         when(lobbyService.isPlayerTimedOutInPlaying(81L)).thenReturn(false);
@@ -131,7 +135,8 @@ class DisconnectServiceTest {
     void checkIdleUsers_activeGameUser_prefersLobbyAfkTimeoutBeforeGameLookup() {
         User activeGameUser = createUser(82L, UserStatus.PLAYING, "playing-token", Instant.now().minusSeconds(9999));
 
-        when(userRepository.findByStatusNot(UserStatus.OFFLINE)).thenReturn(List.of(activeGameUser));
+        when(userRepository.findIdleCandidates(any(Instant.class), anyCollection(), any()))
+                .thenReturn(List.of(activeGameUser));
         when(lobbyService.getPlayingLobbyPlayerIdsSnapshot()).thenReturn(Set.of(82L));
         when(lobbyService.getPlayingLobbyPlayerAfkTimeoutSecondsSnapshot()).thenReturn(java.util.Map.of(82L, 180L));
         when(userRepository.findById(82L)).thenReturn(Optional.of(activeGameUser));
@@ -141,6 +146,32 @@ class DisconnectServiceTest {
 
         verify(gameService, never()).findActiveGameForUser(82L);
         verify(lobbyService).handlePermanentDisconnect(82L);
+    }
+
+    @Test
+    void checkIdleUsers_recentActivePlayerWithShortLobbyTimeout_isStillChecked() {
+        User activeGameUser = createUser(
+                83L,
+                UserStatus.PLAYING,
+                "playing-token",
+                Instant.now().minusSeconds(200));
+
+        when(userRepository.findIdleCandidates(any(Instant.class), anyCollection(), any()))
+                .thenReturn(List.of());
+        when(lobbyService.getPlayingLobbyPlayerIdsSnapshot()).thenReturn(Set.of(83L));
+        when(lobbyService.getPlayingLobbyPlayerAfkTimeoutSecondsSnapshot()).thenReturn(java.util.Map.of(83L, 180L));
+        when(userRepository.findAllById(Set.of(83L))).thenReturn(List.of(activeGameUser));
+        when(userRepository.findById(83L)).thenReturn(Optional.of(activeGameUser));
+        when(lobbyService.isPlayerTimedOutInPlaying(83L)).thenReturn(false);
+
+        disconnectService.checkIdleUsers();
+
+        verify(lobbyService).handlePermanentDisconnect(83L);
+        verify(userRepository, never()).findByStatusNot(UserStatus.OFFLINE);
+        verify(userRepository).findIdleCandidates(
+                any(Instant.class),
+                eq(java.util.Set.of(UserStatus.OFFLINE, UserStatus.SPECTATING)),
+                org.mockito.ArgumentMatchers.argThat(pageable -> pageable.getPageSize() == 1000));
     }
 
     @Test

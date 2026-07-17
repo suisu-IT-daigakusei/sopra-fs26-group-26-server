@@ -10,6 +10,14 @@ services:
   database:
     image: postgres:18.4-alpine
     restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=top
+      - -c
+      - pg_stat_statements.max=1000
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-cabo}
       POSTGRES_USER: ${POSTGRES_USER:-cabo}

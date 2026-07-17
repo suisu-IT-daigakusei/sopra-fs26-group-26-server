@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import java.time.Instant;
 import java.util.List;
 
 @Repository
@@ -26,4 +27,15 @@ public interface MoveRepository extends JpaRepository<Move, Long> {
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("delete from Move m where m.sessionId in :sessionIds")
     int deleteAllBySessionIdsBulk(@Param("sessionIds") List<String> sessionIds);
+
+    /** Deletes a real page of stale moves, so cleanup always advances. */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(value = "DELETE FROM moves WHERE id IN ("
+            + "SELECT m.id FROM moves m "
+            + "JOIN sessions s ON s.session_id = m.session_id "
+            + "WHERE s.is_ended = true AND s.start_time < :cutoff "
+            + "ORDER BY s.start_time ASC, m.id ASC LIMIT :batchSize)",
+            nativeQuery = true)
+    int deleteStaleEndedSessionMovesBatch(@Param("cutoff") Instant cutoff,
+                                          @Param("batchSize") int batchSize);
 }

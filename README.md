@@ -104,7 +104,9 @@ The main areas are:
 - `src/main/java/ch/uzh/ifi/hase/soprafs26/repository` — database access
 - `src/main/resources/application.properties` — shared runtime settings
 
-The Deck of Cards API is used when available; the game service has a local fallback deck.
+Game creation and reshuffling use the complete local Cabo deck and Java's in-process
+shuffle. The production game path performs no external deck HTTP requests. The legacy
+Deck of Cards API adapter remains only for isolated compatibility tests.
 
 ## Repository automation
 

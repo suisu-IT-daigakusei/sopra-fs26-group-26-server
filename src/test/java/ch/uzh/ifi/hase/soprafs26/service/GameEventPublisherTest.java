@@ -103,4 +103,52 @@ class GameEventPublisherTest {
         assertTrue(sessionIds.contains("s2b"));
         assertTrue(sessionIds.contains("s3"));
     }
+
+    @Test
+    void publishFilteredState_dropsDuplicateOrOlderPersistedVersion() {
+        Game game = new Game();
+        game.setId("ordered-game");
+        game.setOrderedPlayerIds(List.of(1L));
+        game.setVersion(2L);
+
+        GameStateBroadcastMapper.SharedBroadcastContext sharedContext = new GameStateBroadcastMapper.SharedBroadcastContext();
+        sharedContext.setSpectatorIds(List.of());
+        when(gameStateBroadcastMapper.buildSharedContext(game)).thenReturn(sharedContext);
+        when(gameStateBroadcastMapper.toBroadcastForViewer(eq(game), eq(1L), eq(sharedContext)))
+                .thenReturn(new GameStateBroadcastDTO());
+        when(webSocketSessionTracker.getTrackedSessionIds(1L)).thenReturn(List.of());
+
+        gameEventPublisher.publishFilteredState(game);
+        gameEventPublisher.publishFilteredState(game);
+        game.setVersion(1L);
+        gameEventPublisher.publishFilteredState(game);
+
+        verify(gameStateBroadcastMapper, times(1)).buildSharedContext(game);
+    }
+
+    @Test
+    void publishFilteredState_retainsOrderingUntilDeletedGameIsExplicitlyForgotten() {
+        GameStateBroadcastMapper.SharedBroadcastContext sharedContext = new GameStateBroadcastMapper.SharedBroadcastContext();
+        sharedContext.setSpectatorIds(List.of());
+        when(gameStateBroadcastMapper.buildSharedContext(any(Game.class))).thenReturn(sharedContext);
+        when(gameStateBroadcastMapper.toBroadcastForViewer(any(Game.class), eq(1L), eq(sharedContext)))
+                .thenReturn(new GameStateBroadcastDTO());
+        when(webSocketSessionTracker.getTrackedSessionIds(1L)).thenReturn(List.of());
+
+        for (int index = 0; index < 2100; index++) {
+            Game game = new Game();
+            game.setId("game-" + index);
+            game.setVersion(1L);
+            game.setOrderedPlayerIds(List.of(1L));
+            gameEventPublisher.publishFilteredState(game);
+        }
+
+        assertEquals(2100, gameEventPublisher.trackedGameVersionCount());
+
+        for (int index = 0; index < 100; index++) {
+            gameEventPublisher.forgetGame("game-" + index);
+        }
+
+        assertEquals(2000, gameEventPublisher.trackedGameVersionCount());
+    }
 }

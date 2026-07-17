@@ -4,9 +4,7 @@ import ch.uzh.ifi.hase.soprafs26.entity.Card;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
 import ch.uzh.ifi.hase.soprafs26.entity.Lobby;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.PeekSelectionDTO;
-import ch.uzh.ifi.hase.soprafs26.rest.dto.GameStateBroadcastDTO;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.GameSyncStateDTO;
-import ch.uzh.ifi.hase.soprafs26.rest.mapper.DTOMapper;
 import ch.uzh.ifi.hase.soprafs26.service.GameService;
 import ch.uzh.ifi.hase.soprafs26.service.HotEndpointRateLimiter;
 import ch.uzh.ifi.hase.soprafs26.service.LobbyService;
@@ -92,15 +90,17 @@ public class GameController {
     // endpoint according to REST interface
     @PostMapping("/lobbies/{sessionId}/start")
     @ResponseStatus(HttpStatus.OK)
-    public Game startGame(  @RequestHeader("Authorization") String token,
+    public Map<String, String> startGame(
+                            @RequestHeader("Authorization") String token,
                             @PathVariable String sessionId,
                             @RequestBody Map<String, Integer> requestBody) {
-        Lobby currentLobby = lobbyService.verifyLobbyCanStart(token, sessionId);
-        // retrieve playerIds of players currently in lobby
-        List<Long> playerIds = currentLobby.getPlayerIds();
-        Game startedGame = gameService.startGame(playerIds, currentLobby);
-        lobbyService.markLobbyAsPlaying(sessionId);
-        return startedGame;
+        Game startedGame = lobbyService.startGameAtomically(token, sessionId);
+        Map<String, String> response = new HashMap<>();
+        response.put("id", startedGame.getId());
+        if (startedGame.getStatus() != null) {
+            response.put("status", startedGame.getStatus().name());
+        }
+        return response;
     }
 
     @GetMapping("/games/active")
@@ -189,8 +189,6 @@ public class GameController {
         }
         return okBuilder.body(syncSnapshot.getPayload());
     }
-
-    // Example empty stubs of move endpoints to demonstrate the interceptor from #30
 
     @PostMapping("/games/{gameId}/moves/draw")
     @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -322,13 +320,11 @@ public class GameController {
 
     // discard the drawn card — POST /games/{gameId}/drawn-card/discard
     @PostMapping("/games/{gameId}/drawn-card/discard")
-    @ResponseStatus(HttpStatus.OK)
-    public Game moveCardToDiscardPile(
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void moveCardToDiscardPile(
             @PathVariable String gameId,
             @RequestHeader("Authorization") String token) {
-        gameService.verifyMoveCallerIsCurrentPlayer(gameId, token);
         gameService.moveCardToDiscardPile(gameId, token);
-        return gameService.getGameById(gameId);
     }
 
     // #47 and #49
@@ -357,14 +353,6 @@ public class GameController {
             @PathVariable String gameId,
             @RequestHeader("Authorization") String token) {
         gameService.skipAbility(gameId, token);
-    }
-
-    @PostMapping("/games/resume/{sessionId}")
-    @ResponseStatus(HttpStatus.CREATED)
-    @ResponseBody
-    public GameStateBroadcastDTO resumeGame(@PathVariable Long sessionId) {
-        Game resumedGame = gameService.resumeGame(sessionId);
-        return DTOMapper.INSTANCE.convertEntityToGameStateBroadcastDTO(resumedGame);
     }
 
 }

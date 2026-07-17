@@ -3,6 +3,8 @@ package ch.uzh.ifi.hase.soprafs26.rest.mapper;
 import ch.uzh.ifi.hase.soprafs26.constant.GameStatus;
 import ch.uzh.ifi.hase.soprafs26.entity.Card;
 import ch.uzh.ifi.hase.soprafs26.entity.Game;
+import ch.uzh.ifi.hase.soprafs26.entity.GameMoveEvent;
+import ch.uzh.ifi.hase.soprafs26.entity.GameMoveStep;
 import ch.uzh.ifi.hase.soprafs26.entity.User;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
 import ch.uzh.ifi.hase.soprafs26.rest.dto.CardViewDTO;
@@ -97,9 +99,11 @@ class GameStateBroadcastMapperTest {
         hands.put(2L, List.of(h2));
         game.setPlayerHands(hands);
         game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setSessionEnded(true);
 
         GameStateBroadcastDTO for1 = mapper.toBroadcastForViewer(game, 1L);
         assertEquals("ABCD1234", for1.getSessionId());
+        assertTrue(for1.isSessionEnded());
         assertEquals(1, for1.getDrawPileCount());
         // own card - but visibility is false
         assertNull(findPlayerHand(for1, 1L).getCards().get(0).getValue());
@@ -107,6 +111,7 @@ class GameStateBroadcastMapperTest {
         assertNull(findPlayerHand(for1, 2L).getCards().get(0).getValue());
 
         GameStateBroadcastDTO for2 = mapper.toBroadcastForViewer(game, 2L);
+        assertTrue(for2.isSessionEnded());
         // other player's card
         assertNull(findPlayerHand(for2, 1L).getCards().get(0).getValue());
         // own card - but visibility is false
@@ -355,6 +360,81 @@ class GameStateBroadcastMapperTest {
             assertEquals(12, player2CardViewedByPlayer1.getValue().intValue());
             assertEquals("QD", player2CardViewedByPlayer1.getCode());
         }
+    }
+
+    @Test
+    void hiddenHandToHandMove_redactsValuesForActorOpponentAndSpectator() {
+        Game game = gameWithMoveEvent(
+                moveStep("HAND", 1L, "HAND", 2L, true, 12),
+                moveStep("HAND", 2L, "HAND", 1L, true, 13));
+
+        for (Long viewerId : List.of(1L, 2L, 99L)) {
+            GameStateBroadcastDTO dto = mapper.toBroadcastForViewer(game, viewerId);
+            assertNotNull(dto.getLastMoveEvent());
+            assertNull(dto.getLastMoveEvent().getPrimary().getValue());
+            assertNull(dto.getLastMoveEvent().getSecondary().getValue());
+        }
+    }
+
+    @Test
+    void hiddenDrawPileToHandMove_revealsValueOnlyToActor() {
+        Game game = gameWithMoveEvent(
+                moveStep("DRAW_PILE", null, "HAND", 1L, true, 8),
+                null);
+
+        GameStateBroadcastDTO actorView = mapper.toBroadcastForViewer(game, 1L);
+        assertEquals(8, actorView.getLastMoveEvent().getPrimary().getValue().intValue());
+
+        for (Long viewerId : List.of(2L, 99L)) {
+            GameStateBroadcastDTO dto = mapper.toBroadcastForViewer(game, viewerId);
+            assertNull(dto.getLastMoveEvent().getPrimary().getValue());
+        }
+    }
+
+    @Test
+    void moveTouchingDiscardPile_keepsFaceUpValuePublic() {
+        Game game = gameWithMoveEvent(
+                moveStep("HAND", 1L, "DISCARD_PILE", null, true, 6),
+                null);
+
+        for (Long viewerId : List.of(1L, 2L, 99L)) {
+            GameStateBroadcastDTO dto = mapper.toBroadcastForViewer(game, viewerId);
+            assertEquals(6, dto.getLastMoveEvent().getPrimary().getValue().intValue());
+        }
+    }
+
+    private static Game gameWithMoveEvent(GameMoveStep primary, GameMoveStep secondary) {
+        GameMoveEvent event = new GameMoveEvent();
+        event.setSequence(7L);
+        event.setActorUserId(1L);
+        event.setPrimary(primary);
+        event.setSecondary(secondary);
+
+        Game game = new Game();
+        game.setId("move-event-game");
+        game.setStatus(GameStatus.ROUND_ACTIVE);
+        game.setCurrentPlayerId(1L);
+        game.setOrderedPlayerIds(List.of(1L, 2L));
+        game.setPlayerHands(Map.of(1L, List.of(), 2L, List.of()));
+        game.setLastMoveEvent(event);
+        return game;
+    }
+
+    private static GameMoveStep moveStep(
+            String sourceZone,
+            Long sourceUserId,
+            String targetZone,
+            Long targetUserId,
+            boolean hidden,
+            Integer value) {
+        GameMoveStep step = new GameMoveStep();
+        step.setSourceZone(sourceZone);
+        step.setSourceUserId(sourceUserId);
+        step.setTargetZone(targetZone);
+        step.setTargetUserId(targetUserId);
+        step.setHidden(hidden);
+        step.setValue(value);
+        return step;
     }
 
     private static Card faceDownCard(int value, String code) {

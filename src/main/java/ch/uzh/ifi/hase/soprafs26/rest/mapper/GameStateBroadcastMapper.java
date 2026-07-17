@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 // builds a game state representation with filtered data for a given player
 @Component
@@ -49,6 +50,7 @@ public class GameStateBroadcastMapper {
         dto.setCurrentTurnUserId(game.getCurrentPlayerId());
         dto.setCaboCalled(game.isCaboCalled());
         dto.setCaboForcedByTimeout(game.isCaboForcedByTimeout());
+        dto.setSessionEnded(game.isSessionEnded());
         dto.setTurnSeconds(game.getTurnSeconds());
         dto.setInitialPeekSeconds(game.getInitialPeekSeconds());
         dto.setAbilityRevealSeconds(game.getAbilityRevealSeconds());
@@ -56,7 +58,7 @@ public class GameStateBroadcastMapper {
         dto.setCaboRevealSeconds(game.getCaboRevealSeconds());
         dto.setRematchDecisionSeconds(game.getRematchDecisionSeconds());
         dto.setAfkTimeoutSeconds(game.getAfkTimeoutSeconds());
-        dto.setLastMoveEvent(toMoveEventDTO(game.getLastMoveEvent()));
+        dto.setLastMoveEvent(toMoveEventDTO(game.getLastMoveEvent(), viewerUserId));
 
         List<Card> draw = game.getDrawPile();
         dto.setDrawPileCount(draw == null ? 0 : draw.size());
@@ -220,24 +222,51 @@ public class GameStateBroadcastMapper {
         }
     }
 
-    private GameMoveEventDTO toMoveEventDTO(GameMoveEvent event) {
+    private GameMoveEventDTO toMoveEventDTO(GameMoveEvent event, Long viewerUserId) {
         if (event == null) {
             return null;
         }
         GameMoveEventDTO dto = new GameMoveEventDTO();
         BeanUtils.copyProperties(event, dto, "primary", "secondary");
-        dto.setPrimary(toMoveStepDTO(event.getPrimary()));
-        dto.setSecondary(toMoveStepDTO(event.getSecondary()));
+        dto.setPrimary(toMoveStepDTO(event.getPrimary(), event.getActorUserId(), viewerUserId));
+        dto.setSecondary(toMoveStepDTO(event.getSecondary(), event.getActorUserId(), viewerUserId));
         return dto;
     }
 
-    private GameMoveStepDTO toMoveStepDTO(GameMoveStep step) {
+    private GameMoveStepDTO toMoveStepDTO(GameMoveStep step, Long actorUserId, Long viewerUserId) {
         if (step == null) {
             return null;
         }
         GameMoveStepDTO dto = new GameMoveStepDTO();
         BeanUtils.copyProperties(step, dto);
+        if (!canViewerSeeMoveValue(step, actorUserId, viewerUserId)) {
+            dto.setValue(null);
+        }
         return dto;
+    }
+
+    private boolean canViewerSeeMoveValue(GameMoveStep step, Long actorUserId, Long viewerUserId) {
+        if (step == null || step.getValue() == null || !step.isHidden()) {
+            return true;
+        }
+
+        // The discard pile is face-up public information, whether the card is
+        // arriving there or originated there.
+        if ("DISCARD_PILE".equals(step.getSourceZone())
+                || "DISCARD_PILE".equals(step.getTargetZone())) {
+            return true;
+        }
+
+        // A card drawn from the face-down deck is known only to the player who
+        // drew it while it moves into that player's hidden hand.
+        if ("DRAW_PILE".equals(step.getSourceZone())
+                && "HAND".equals(step.getTargetZone())) {
+            return Objects.equals(actorUserId, viewerUserId);
+        }
+
+        // In particular, blind hand-to-hand ability swaps must never disclose
+        // either card value through animation metadata.
+        return false;
     }
 
     private CardViewDTO toCardView(int position, Card card, Long handOwnerId, Long viewerUserId, Long currentPlayerId,

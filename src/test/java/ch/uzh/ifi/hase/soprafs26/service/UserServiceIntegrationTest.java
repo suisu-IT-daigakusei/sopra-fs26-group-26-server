@@ -165,7 +165,7 @@ public class UserServiceIntegrationTest {
         secondUpdate.setPreferredColorPriority(nextPriority);
         assertDoesNotThrow(() -> userService.updateUser(user.getId(), secondUpdate));
 
-        User persisted = userService.getUserById(user.getId());
+        User persisted = userService.getUserProfileById(user.getId());
         assertEquals(nextPriority, persisted.getPreferredColorPriority());
     }
 }

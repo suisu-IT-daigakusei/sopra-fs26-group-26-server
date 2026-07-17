@@ -10,6 +10,8 @@ import org.mockito.Mockito;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import java.util.Map;
+
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -35,13 +37,15 @@ class SessionControllerTest {
     }
 
     @Test
-    void getSessionHistory_validRequest_returnsHistory() throws Exception {
+    void getSessionHistory_authenticatedUser_returnsHistory() throws Exception {
         // 1. Setup
         User mockUser = new User();
+        mockUser.setId(7L);
         mockUser.setToken("valid-token");
         
         Session mockSession = new Session();
         mockSession.setSessionId("session-123");
+        mockSession.setTotalScoreByUserId(Map.of(7L, 42));
 
         Mockito.when(userRepository.findByToken("valid-token")).thenReturn(mockUser);
         Mockito.when(sessionRepository.findBySessionId("session-123")).thenReturn(mockSession);
@@ -51,6 +55,24 @@ class SessionControllerTest {
                 .header("Authorization", "valid-token"))
                .andExpect(status().isOk()) // 200 OK
                .andExpect(jsonPath("$.sessionId", is("session-123"))); 
+    }
+
+    @Test
+    void getSessionHistory_authenticatedNonParticipant_returnsHistory() throws Exception {
+        User authenticatedUser = new User();
+        authenticatedUser.setId(99L);
+
+        Session session = new Session();
+        session.setSessionId("session-123");
+        session.setTotalScoreByUserId(Map.of(7L, 42));
+
+        Mockito.when(userRepository.findByToken("valid-token")).thenReturn(authenticatedUser);
+        Mockito.when(sessionRepository.findBySessionId("session-123")).thenReturn(session);
+
+        mockMvc.perform(get("/sessions/session-123/history")
+                .header("Authorization", "valid-token"))
+               .andExpect(status().isOk())
+               .andExpect(jsonPath("$.sessionId", is("session-123")));
     }
 
     @Test
@@ -65,6 +87,14 @@ class SessionControllerTest {
                
         // Verify we never even tried to look up the session because the token failed first
         Mockito.verify(sessionRepository, Mockito.never()).findBySessionId(Mockito.anyString());
+    }
+
+    @Test
+    void getSessionHistory_missingToken_throwsUnauthorized() throws Exception {
+        mockMvc.perform(get("/sessions/session-123/history"))
+               .andExpect(status().isUnauthorized());
+
+        Mockito.verifyNoInteractions(userRepository, sessionRepository);
     }
 
     @Test

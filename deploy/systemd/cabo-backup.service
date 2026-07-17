@@ -1,0 +1,22 @@
+[Unit]
+Description=Structurally validated Cabo PostgreSQL backup
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/opt/cabo/sopra-fs26-group-26-server/deploy/.env
+
+[Service]
+Type=oneshot
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/cabo/sopra-fs26-group-26-server/deploy/scripts/backup-database.py
+User=root
+Group=root
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=cabo-backups
+StateDirectoryMode=0700

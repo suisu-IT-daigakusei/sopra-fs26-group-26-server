@@ -1,10 +1,13 @@
 package ch.uzh.ifi.hase.soprafs26.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -150,16 +153,27 @@ public class MoveServiceTest {
 
     @Test
     public void cleanupStaleSessionMovesJob_deletesMovesForOldEndedSessions() {
-        Session staleEnded = new Session();
-        staleEnded.setSessionId("old-session");
-        staleEnded.setEnded(true);
-        staleEnded.setStartTime(Instant.now().minusSeconds(60L * 60L * 30L));
-
-        when(sessionRepository.findTop200ByIsEndedTrueAndStartTimeBeforeOrderByStartTimeAsc(any()))
-                .thenReturn(List.of(staleEnded));
+        when(moveRepository.deleteStaleEndedSessionMovesBatch(any(), anyInt())).thenReturn(12);
 
         moveService.cleanupStaleSessionMovesJob();
 
-        verify(moveRepository).deleteAllBySessionIdsBulk(List.of("old-session"));
+        verify(moveRepository).deleteStaleEndedSessionMovesBatch(any(), anyInt());
+    }
+
+    @Test
+    public void cleanupStaleSessionMovesJob_hasEffectiveTransactionalBoundary() throws Exception {
+        assertNotNull(MoveService.class
+                .getDeclaredMethod("cleanupStaleSessionMovesJob")
+                .getAnnotation(org.springframework.transaction.annotation.Transactional.class));
+    }
+
+    @Test
+    public void cleanupStaleSessionMovesJob_fullBatchesContinuesUntilPartialBatch() {
+        when(moveRepository.deleteStaleEndedSessionMovesBatch(any(), anyInt()))
+                .thenReturn(1000, 1000, 7);
+
+        moveService.cleanupStaleSessionMovesJob();
+
+        verify(moveRepository, times(3)).deleteStaleEndedSessionMovesBatch(any(), anyInt());
     }
 }

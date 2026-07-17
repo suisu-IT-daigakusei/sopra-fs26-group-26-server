@@ -13,6 +13,7 @@ public class GameSyncStateDTO {
     private Long currentTurnUserId;
     private Boolean caboCalled;
     private Boolean caboForcedByTimeout;
+    private Boolean sessionEnded;
     private List<Long> timedOutPlayerIds;
     private Long afkTimeoutSeconds;
     private List<Card> myHand;
@@ -51,6 +52,14 @@ public class GameSyncStateDTO {
 
     public void setCaboForcedByTimeout(Boolean caboForcedByTimeout) {
         this.caboForcedByTimeout = caboForcedByTimeout;
+    }
+
+    public Boolean getSessionEnded() {
+        return sessionEnded;
+    }
+
+    public void setSessionEnded(Boolean sessionEnded) {
+        this.sessionEnded = sessionEnded;
     }
 
     public List<Long> getTimedOutPlayerIds() {

@@ -6,11 +6,14 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import org.hibernate.annotations.DynamicUpdate;
 
 import java.util.ArrayList;
 import java.util.List;
 
 @Entity
+@DynamicUpdate
 @Table(name = "users")
 public class User extends UserProfileResponseBase {
 
@@ -35,6 +38,13 @@ public class User extends UserProfileResponseBase {
 
     @Column(nullable = false)
     private Integer totalPointsAccumulated = 0;
+
+    /** Internal counters used to maintain averageScorePerRound incrementally. */
+    @Column(nullable = false)
+    private Integer roundsPlayed = 0;
+
+    @Column(nullable = false)
+    private Integer totalRoundPointsAccumulated = 0;
 
     public String getPassword() {
         return password;
@@ -82,5 +92,23 @@ public class User extends UserProfileResponseBase {
 
     public void setTotalPointsAccumulated(Integer totalPointsAccumulated) {
         this.totalPointsAccumulated = totalPointsAccumulated;
+    }
+
+    @JsonIgnore
+    public Integer getRoundsPlayed() {
+        return roundsPlayed;
+    }
+
+    public void setRoundsPlayed(Integer roundsPlayed) {
+        this.roundsPlayed = roundsPlayed;
+    }
+
+    @JsonIgnore
+    public Integer getTotalRoundPointsAccumulated() {
+        return totalRoundPointsAccumulated;
+    }
+
+    public void setTotalRoundPointsAccumulated(Integer totalRoundPointsAccumulated) {
+        this.totalRoundPointsAccumulated = totalRoundPointsAccumulated;
     }
 }

@@ -9,11 +9,15 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -25,6 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @Transactional
 public class DisconnectService {
     private static final Logger log = LoggerFactory.getLogger(DisconnectService.class);
+    private static final int IDLE_CANDIDATE_BATCH_SIZE = 1000;
 
     private static final class DisconnectTimerEntry {
         private final long version;
@@ -117,7 +122,6 @@ public class DisconnectService {
      */
     @Scheduled(fixedDelayString = "#{@timeoutSettingsProperties.idleCheckIntervalMs}")
     public void checkIdleUsers() {
-        List<User> users = userRepository.findByStatusNot(UserStatus.OFFLINE);
         Set<Long> activeGameUserIds = lobbyService != null
                 ? lobbyService.getPlayingLobbyPlayerIdsSnapshot()
                 : Set.of();
@@ -129,6 +133,33 @@ public class DisconnectService {
         }
 
         Instant now = Instant.now();
+        Instant defaultIdleCutoff = now.minusSeconds(timeoutSettings.getIdleSeconds());
+
+        // Do not materialize every online User every ten seconds. PostgreSQL first
+        // narrows ordinary users to genuinely stale heartbeat candidates. Active
+        // game players are a small separately bounded set because a lobby may use
+        // an AFK timeout shorter than the global default.
+        Map<Long, User> candidatesById = new LinkedHashMap<>();
+        List<User> staleDefaultCandidates = userRepository.findIdleCandidates(
+                defaultIdleCutoff,
+                EnumSet.of(UserStatus.OFFLINE, UserStatus.SPECTATING),
+                PageRequest.of(0, IDLE_CANDIDATE_BATCH_SIZE));
+        if (staleDefaultCandidates != null) {
+            for (User candidate : staleDefaultCandidates) {
+                if (candidate != null && candidate.getId() != null) {
+                    candidatesById.put(candidate.getId(), candidate);
+                }
+            }
+        }
+        if (activeGameUserIds != null && !activeGameUserIds.isEmpty()) {
+            for (User activePlayer : userRepository.findAllById(activeGameUserIds)) {
+                if (activePlayer != null && activePlayer.getId() != null) {
+                    candidatesById.put(activePlayer.getId(), activePlayer);
+                }
+            }
+        }
+
+        List<User> users = new ArrayList<>(candidatesById.values());
         for (User user : users) {
             if (user != null && user.getStatus() == UserStatus.SPECTATING) {
                 // Spectators are fully exempt from idle-timeout removal.

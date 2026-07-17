@@ -61,6 +61,13 @@ public class CaboInviteService {
     }
 
     private CaboInvitePendingDTO toPendingDto(CaboInvite invite, User fromUser) {
+        Lobby lobby = invite == null || invite.getLobbyId() == null
+                ? null
+                : lobbyRepository.findById(invite.getLobbyId()).orElse(null);
+        return toPendingDto(invite, fromUser, lobby);
+    }
+
+    private CaboInvitePendingDTO toPendingDto(CaboInvite invite, User fromUser, Lobby lobby) {
         CaboInvitePendingDTO dto = new CaboInvitePendingDTO();
         dto.setId(invite.getId());
         dto.setFromUserId(fromUser.getId());
@@ -69,10 +76,10 @@ public class CaboInviteService {
         if (invite.getCreatedAt() != null) {
             dto.setInviteCreationDate(invite.getCreatedAt().toString());
         }
-        lobbyService.findLobbyById(invite.getLobbyId()).ifPresent(lobby -> {
+        if (lobby != null) {
             dto.setSessionId(lobby.getSessionId());
             dto.setSessionHostUserId(lobby.getSessionHostUserId());
-        });
+        }
         return dto;
     }
 
@@ -124,16 +131,22 @@ public class CaboInviteService {
         invite.setStatus(CaboInviteStatus.PENDING);
         invite = caboInviteRepository.save(invite);
 
-        CaboInvitePendingDTO dto = toPendingDto(invite, from);
+        CaboInvitePendingDTO dto = toPendingDto(invite, from, waiting);
         caboInviteEventPublisher.publishToInviteeAfterCommit(to.getId(), dto);
         return dto;
     }
 
     private List<CaboInviteSentDTO> listSentForHost(User host) {
         return lobbyService.findWaitingLobbyForHost(host.getId())
-                .map(waiting -> latestInvitePerToUserForLobby(host.getId(), waiting.getId()).values().stream()
-                        .map(this::toSentDto)
-                        .toList())
+                .map(waiting -> {
+                    List<CaboInvite> invites = new ArrayList<>(
+                            latestInvitePerToUserForLobby(host.getId(), waiting.getId()).values());
+                    Map<Long, User> usersById = loadUsersById(
+                            invites.stream().map(CaboInvite::getToUserId).toList());
+                    return invites.stream()
+                            .map(invite -> toSentDto(invite, usersById, waiting))
+                            .toList();
+                })
                 .orElse(List.of());
     }
 
@@ -156,28 +169,87 @@ public class CaboInviteService {
     }
 
     private CaboInviteSentDTO toSentDto(CaboInvite inv) {
+        Map<Long, User> usersById = loadUsersById(List.of(inv.getToUserId()));
+        Lobby lobby = inv.getLobbyId() == null
+                ? null
+                : lobbyRepository.findById(inv.getLobbyId()).orElse(null);
+        return toSentDto(inv, usersById, lobby);
+    }
+
+    private CaboInviteSentDTO toSentDto(CaboInvite inv, Map<Long, User> usersById, Lobby lobby) {
         CaboInviteSentDTO dto = new CaboInviteSentDTO();
         dto.setToUserId(inv.getToUserId());
         String status = inv.getStatus().name();
         if (inv.getStatus() == CaboInviteStatus.ACCEPTED) {
-            String stillInWaitingLobby = lobbyService.getWaitingSessionIdIfPlayerInLobby(inv.getLobbyId(), inv.getToUserId());
-            if (stillInWaitingLobby == null || stillInWaitingLobby.isBlank()) {
+            boolean stillInWaitingLobby = lobby != null
+                    && "WAITING".equals(lobby.getStatus())
+                    && lobby.getPlayerIds() != null
+                    && lobby.getPlayerIds().contains(inv.getToUserId());
+            if (!stillInWaitingLobby) {
                 status = CaboInviteStatus.DECLINED.name();
             }
         }
         dto.setStatus(status);
-        userRepository.findById(inv.getToUserId()).ifPresent(u -> dto.setToUsername(u.getUsername()));
+        User toUser = usersById.get(inv.getToUserId());
+        if (toUser != null) {
+            dto.setToUsername(toUser.getUsername());
+        }
         return dto;
     }
 
     private List<CaboInvitePendingDTO> listPendingForInvitee(User invitee) {
-        return caboInviteRepository
-                .findByToUserIdAndStatusOrderByCreatedAtAsc(invitee.getId(), CaboInviteStatus.PENDING)
-                .stream()
-                .filter(inv -> lobbyService.isLobbyWaiting(inv.getLobbyId()))
-                .flatMap(inv -> userRepository.findById(inv.getFromUserId()).stream()
-                        .map(from -> toPendingDto(inv, from)))
+        List<CaboInvite> pendingInvites = caboInviteRepository
+                .findByToUserIdAndStatusOrderByCreatedAtAsc(invitee.getId(), CaboInviteStatus.PENDING);
+        Map<Long, Lobby> lobbiesById = loadLobbiesById(
+                pendingInvites.stream().map(CaboInvite::getLobbyId).toList());
+        Map<Long, User> usersById = loadUsersById(
+                pendingInvites.stream().map(CaboInvite::getFromUserId).toList());
+
+        return pendingInvites.stream()
+                .filter(inv -> {
+                    Lobby lobby = lobbiesById.get(inv.getLobbyId());
+                    return lobby != null && "WAITING".equals(lobby.getStatus());
+                })
+                .map(inv -> {
+                    User from = usersById.get(inv.getFromUserId());
+                    return from == null ? null : toPendingDto(inv, from, lobbiesById.get(inv.getLobbyId()));
+                })
+                .filter(java.util.Objects::nonNull)
                 .toList();
+    }
+
+    private Map<Long, User> loadUsersById(List<Long> userIds) {
+        Set<Long> distinctIds = new HashSet<>();
+        if (userIds != null) {
+            userIds.stream().filter(java.util.Objects::nonNull).forEach(distinctIds::add);
+        }
+        Map<Long, User> usersById = new LinkedHashMap<>();
+        if (distinctIds.isEmpty()) {
+            return usersById;
+        }
+        for (User user : userRepository.findAllById(distinctIds)) {
+            if (user != null && user.getId() != null) {
+                usersById.put(user.getId(), user);
+            }
+        }
+        return usersById;
+    }
+
+    private Map<Long, Lobby> loadLobbiesById(List<Long> lobbyIds) {
+        Set<Long> distinctIds = new HashSet<>();
+        if (lobbyIds != null) {
+            lobbyIds.stream().filter(java.util.Objects::nonNull).forEach(distinctIds::add);
+        }
+        Map<Long, Lobby> lobbiesById = new LinkedHashMap<>();
+        if (distinctIds.isEmpty()) {
+            return lobbiesById;
+        }
+        for (Lobby lobby : lobbyRepository.findAllById(distinctIds)) {
+            if (lobby != null && lobby.getId() != null) {
+                lobbiesById.put(lobby.getId(), lobby);
+            }
+        }
+        return lobbiesById;
     }
 
     public List<CaboInvitePendingDTO> getPendingInvitesForUser(String token, Long userId) {

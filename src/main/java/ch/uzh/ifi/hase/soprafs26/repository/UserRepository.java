@@ -1,8 +1,10 @@
 package ch.uzh.ifi.hase.soprafs26.repository;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -25,7 +27,15 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
 	List<User> findByLastHeartbeatBeforeAndStatusNot(Instant cutoff, UserStatus status);
 
+	@Query("select u from User u "
+			+ "where u.lastHeartbeat is not null and u.lastHeartbeat < :cutoff "
+			+ "and u.status not in :excludedStatuses "
+			+ "order by u.lastHeartbeat asc, u.id asc")
+	List<User> findIdleCandidates(
+			@Param("cutoff") Instant cutoff,
+			@Param("excludedStatuses") Collection<UserStatus> excludedStatuses,
+			Pageable pageable);
+
 	@Query("select u from User u join u.friendUserIds friendId where friendId = :targetUserId")
 	List<User> findUsersWhoSelectedFriendId(@Param("targetUserId") Long targetUserId);
 }
-

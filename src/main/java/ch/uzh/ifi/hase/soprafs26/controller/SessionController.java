@@ -29,7 +29,10 @@ public class SessionController {
     @ResponseStatus(HttpStatus.OK)
     public SessionHistoryDTO getSessionHistory(
             @PathVariable String sessionId,
-            @RequestHeader("Authorization") String token) {
+            @RequestHeader(value = "Authorization", required = false) String token) {
+        if (token == null || token.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Missing token");
+        }
         User authenticatedUser = userRepository.findByToken(token);
         if (authenticatedUser == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid token");

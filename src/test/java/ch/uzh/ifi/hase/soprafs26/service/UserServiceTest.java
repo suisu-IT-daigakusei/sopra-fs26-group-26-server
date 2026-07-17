@@ -18,6 +18,13 @@ import ch.uzh.ifi.hase.soprafs26.rest.dto.FriendRequestIncomingDTO;
 import ch.uzh.ifi.hase.soprafs26.repository.LobbyRepository;
 import ch.uzh.ifi.hase.soprafs26.repository.SessionRepository;
 import ch.uzh.ifi.hase.soprafs26.repository.UserRepository;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.Direction;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.Sort;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.UserListHit;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.UserListPage;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.UserListQuery;
+import ch.uzh.ifi.hase.soprafs26.repository.UserListQueryRepository.View;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -26,6 +33,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.verify;
@@ -83,6 +91,9 @@ public class UserServiceTest {
 
     @Mock
     private LobbyService lobbyService;
+
+    @Mock
+    private UserListQueryRepository userListQueryRepository;
 
 	@InjectMocks
 	private UserService userService;
@@ -284,6 +295,7 @@ public class UserServiceTest {
         existing.setStatus(UserStatus.OFFLINE);
 
         when(userRepository.findByUsername("trimUser")).thenReturn(existing);
+        when(lobbyRepository.findHighestPriorityPresenceForUser(77L)).thenReturn(List.of());
         when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 77L)).thenReturn(false);
         when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 77L)).thenReturn(false);
         when(lobbyRepository.existsByStatusAndPlayerId("WAITING", 77L)).thenReturn(false);
@@ -307,6 +319,7 @@ public class UserServiceTest {
         user.setLastHeartbeat(null);
 
         when(userRepository.findByToken("token-online")).thenReturn(user);
+        when(lobbyRepository.findHighestPriorityPresenceForUser(10L)).thenReturn(List.of());
         when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 10L)).thenReturn(false);
         when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 10L)).thenReturn(false);
         when(lobbyRepository.existsByStatusAndPlayerId("WAITING", 10L)).thenReturn(false);
@@ -329,6 +342,8 @@ public class UserServiceTest {
         user.setLastHeartbeat(null);
 
         when(userRepository.findByToken("token-lobby")).thenReturn(user);
+        when(lobbyRepository.findHighestPriorityPresenceForUser(11L))
+                .thenReturn(List.<Object[]>of(new Object[]{"WAITING", true}));
         when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 11L)).thenReturn(false);
         when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 11L)).thenReturn(false);
         when(lobbyRepository.existsByStatusAndPlayerId("WAITING", 11L)).thenReturn(true);
@@ -350,6 +365,8 @@ public class UserServiceTest {
         user.setLastHeartbeat(null);
 
         when(userRepository.findByToken("token-playing")).thenReturn(user);
+        when(lobbyRepository.findHighestPriorityPresenceForUser(12L))
+                .thenReturn(List.<Object[]>of(new Object[]{"PLAYING", true}));
         when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 12L)).thenReturn(true);
 
         userService.heartbeat("token-playing");
@@ -370,6 +387,8 @@ public class UserServiceTest {
         user.setStatus(UserStatus.OFFLINE);
 
         when(userRepository.findByToken("t13")).thenReturn(user);
+        when(lobbyRepository.findHighestPriorityPresenceForUser(13L))
+                .thenReturn(List.<Object[]>of(new Object[]{"WAITING", false}));
         when(lobbyRepository.existsByStatusAndPlayerId("PLAYING", 13L)).thenReturn(false);
         when(lobbyRepository.existsByStatusAndParticipantId("PLAYING", 13L)).thenReturn(false);
         when(lobbyRepository.existsByStatusAndPlayerId("WAITING", 13L)).thenReturn(false);
@@ -415,6 +434,23 @@ public class UserServiceTest {
         u3.setUsername("u3");
         u3.setPassword("pw");
         u3.setCreationDate(LocalDate.now());
+
+        // Session-end commands maintain these counters incrementally.
+        u1.setGamesWon(1);
+        u1.setGamesPlayed(2);
+        u1.setTotalPointsAccumulated(60);
+        u1.setRoundsWon(1);
+        u1.setAverageScorePerRound(20);
+        u2.setGamesWon(1);
+        u2.setGamesPlayed(2);
+        u2.setTotalPointsAccumulated(55);
+        u2.setRoundsWon(2);
+        u2.setAverageScorePerRound(18);
+        u3.setGamesWon(0);
+        u3.setGamesPlayed(1);
+        u3.setTotalPointsAccumulated(25);
+        u3.setRoundsWon(0);
+        u3.setAverageScorePerRound(25);
 
         // when we query repository for all users, return the 3 users
         when(userRepository.findAll()).thenReturn(new ArrayList<>(List.of(u1, u2, u3)));
@@ -468,6 +504,7 @@ public class UserServiceTest {
         assertEquals(2, u1.getOverallRank());
         assertEquals(1, u2.getOverallRank());
         assertEquals(3, u3.getOverallRank());
+        Mockito.verify(sessionRepository, Mockito.never()).findAll();
     }
 
     // user3 joins session during 2nd round (round index=1)
@@ -492,6 +529,22 @@ public class UserServiceTest {
         u3.setUsername("u3");
         u3.setPassword("pw");
         u3.setCreationDate(LocalDate.now());
+
+        u1.setGamesWon(0);
+        u1.setGamesPlayed(1);
+        u1.setTotalPointsAccumulated(25);
+        u1.setRoundsWon(1);
+        u1.setAverageScorePerRound(13);
+        u2.setGamesWon(0);
+        u2.setGamesPlayed(1);
+        u2.setTotalPointsAccumulated(30);
+        u2.setRoundsWon(0);
+        u2.setAverageScorePerRound(15);
+        u3.setGamesWon(1);
+        u3.setGamesPlayed(1);
+        u3.setTotalPointsAccumulated(5);
+        u3.setRoundsWon(1);
+        u3.setAverageScorePerRound(5);
 
         // when we query repository for all users, return the 3 users
         when(userRepository.findAll()).thenReturn(new ArrayList<>(List.of(u1, u2, u3)));
@@ -549,6 +602,12 @@ public class UserServiceTest {
         u2.setUsername("u2");
         u2.setPassword("pw");
         u2.setCreationDate(LocalDate.now());
+
+        // Round aggregates are maintained by the round-scoring command.
+        u1.setRoundsWon(1);
+        u1.setAverageScorePerRound(4);
+        u2.setRoundsWon(0);
+        u2.setAverageScorePerRound(10);
 
         // when we query repository for all users, return the 2 users
         when(userRepository.findAll()).thenReturn(new ArrayList<>(List.of(u1, u2)));
@@ -875,6 +934,47 @@ public class UserServiceTest {
         verify(userRepository, Mockito.atLeastOnce()).save(me);
         verify(userRepository, Mockito.atLeastOnce()).save(other);
         verify(userRepository, Mockito.atLeastOnce()).flush();
+    }
+
+    @Test
+    void getUsersPagePreservesJdbcOrderAndNeverLoadsAllUsers() {
+        User first = new User();
+        first.setId(1L);
+        first.setUsername("first");
+        User second = new User();
+        second.setId(2L);
+        second.setUsername("second");
+
+        UserListQuery query = new UserListQuery(
+                View.LEADERBOARD,
+                0,
+                2,
+                "",
+                Set.of(),
+                false,
+                null,
+                Set.of(),
+                Set.of(),
+                Sort.RANK,
+                Direction.ASC);
+        when(userListQueryRepository.findPage(query)).thenReturn(
+                new UserListPage(
+                        List.of(new UserListHit(2L, 1), new UserListHit(1L, 2)),
+                        3L));
+        when(userRepository.findAllById(List.of(2L, 1L))).thenReturn(List.of(first, second));
+
+        UserService.PagedUsers result = userService.getUsersPage(query);
+
+        assertEquals(List.of(2L, 1L), result.items().stream()
+                .map(UserService.PagedUser::user)
+                .map(User::getId)
+                .toList());
+        assertEquals(List.of(1, 2), result.items().stream()
+                .map(UserService.PagedUser::globalRank)
+                .toList());
+        assertEquals(2, result.totalPages());
+        assertTrue(result.hasNext());
+        verify(userRepository, Mockito.never()).findAll();
     }
 
 }

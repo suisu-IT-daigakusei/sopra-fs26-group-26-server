@@ -12,6 +12,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.MappedSuperclass;
 import jakarta.persistence.OrderColumn;
+import org.hibernate.annotations.BatchSize;
 
 import java.io.Serializable;
 import java.time.LocalDate;
@@ -50,7 +51,8 @@ public abstract class UserProfileResponseBase implements Serializable {
     @Column(nullable = false)
     private String profileCharacterId = "char01";
 
-    @ElementCollection(fetch = FetchType.EAGER)
+    @ElementCollection(fetch = FetchType.LAZY)
+    @BatchSize(size = 50)
     @jakarta.persistence.CollectionTable(name = "user_preferred_color_priority", joinColumns = @JoinColumn(name = "user_id"))
     @Column(name = "color", nullable = false)
     @OrderColumn(name = "priority_index")
@@ -77,7 +79,8 @@ public abstract class UserProfileResponseBase implements Serializable {
     @Column(nullable = false)
     private Integer soundEffectsVolume = 30;
 
-    @ElementCollection(fetch = FetchType.EAGER)
+    @ElementCollection(fetch = FetchType.LAZY)
+    @BatchSize(size = 50)
     @jakarta.persistence.CollectionTable(name = "user_music_blacklist", joinColumns = @JoinColumn(name = "user_id"))
     @Column(name = "track_tag", nullable = false)
     @OrderColumn(name = "tag_index")
