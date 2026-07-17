@@ -1,0 +1,150 @@
+name: cabo-production
+
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  database:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cabo}
+      POSTGRES_USER: ${POSTGRES_USER:-cabo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 60s
+    shm_size: 128mb
+    mem_limit: 768m
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  server:
+    build:
+      context: ..
+      args:
+        CABO_SERVER_BUILD_COMMIT_ID: ${CABO_SERVER_BUILD_COMMIT_ID:-unknown}
+        CABO_SERVER_BUILD_COMMIT_TIMESTAMP: ${CABO_SERVER_BUILD_COMMIT_TIMESTAMP:-}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: production
+      DB_URL: jdbc:postgresql://database:5432/${POSTGRES_DB:-cabo}
+      DB_USERNAME: ${POSTGRES_USER:-cabo}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://cabo.studenski.me}
+      DB_POOL_MAX_SIZE: "8"
+      DB_POOL_MIN_IDLE: "1"
+      SERVER_THREADS_MAX: "32"
+      SERVER_THREADS_MIN_SPARE: "4"
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx1024m -XX:+ExitOnOutOfMemoryError
+    expose:
+      - "8080"
+    networks:
+      - app
+      - data
+    healthcheck:
+      test: ["CMD", "bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    stop_grace_period: 30s
+    mem_limit: 1536m
+    pids_limit: 384
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  client:
+    build:
+      context: ../../sopra-fs26-group-26-client
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL in deploy/.env}
+        CABO_CLIENT_BUILD_COMMIT_ID: ${CABO_CLIENT_BUILD_COMMIT_ID:-unknown}
+        CABO_CLIENT_BUILD_COMMIT_TIMESTAMP: ${CABO_CLIENT_BUILD_COMMIT_TIMESTAMP:-}
+        CABO_SERVER_BUILD_COMMIT_ID: ${CABO_SERVER_BUILD_COMMIT_ID:-unknown}
+        CABO_SERVER_BUILD_COMMIT_TIMESTAMP: ${CABO_SERVER_BUILD_COMMIT_TIMESTAMP:-}
+    restart: unless-stopped
+    init: true
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL in deploy/.env}
+      NODE_OPTIONS: --max-old-space-size=512
+      CABO_CLIENT_BUILD_COMMIT_ID: ${CABO_CLIENT_BUILD_COMMIT_ID:-unknown}
+      CABO_CLIENT_BUILD_COMMIT_TIMESTAMP: ${CABO_CLIENT_BUILD_COMMIT_TIMESTAMP:-}
+      CABO_SERVER_BUILD_COMMIT_ID: ${CABO_SERVER_BUILD_COMMIT_ID:-unknown}
+      CABO_SERVER_BUILD_COMMIT_TIMESTAMP: ${CABO_SERVER_BUILD_COMMIT_TIMESTAMP:-}
+    expose:
+      - "3000"
+    networks:
+      - app
+    stop_grace_period: 20s
+    mem_limit: 768m
+    pids_limit: 256
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    depends_on:
+      client:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in deploy/.env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - app
+    stop_grace_period: 15s
+    mem_limit: 256m
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+networks:
+  app:
+  data:
+    internal: true
+
+volumes:
+  postgres-data:
+    name: cabo-postgres-data
+  caddy-data:
+    name: cabo-caddy-data
+  caddy-config:
+    name: cabo-caddy-config

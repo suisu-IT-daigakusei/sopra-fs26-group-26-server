@@ -1,0 +1,35 @@
+{
+    email {$ACME_EMAIL}
+}
+
+cabo.studenski.me {
+    encode zstd gzip
+
+    @backend path /backend /backend/*
+    handle @backend {
+        uri strip_prefix /backend
+        reverse_proxy server:8080 {
+            health_uri /build-info
+            health_interval 30s
+            health_timeout 5s
+        }
+    }
+
+    handle {
+        reverse_proxy client:3000
+    }
+
+    header {
+        -Server
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex"
+    }
+
+    log {
+        output stdout
+        format json
+    }
+}
